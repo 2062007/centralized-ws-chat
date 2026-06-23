@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^4.0.1",
+    "@nestjs/axios": "^4.0.1",
     "better-sqlite3": "^9.2.2",
     "bcrypt": "^5.1.1",
     "dotenv": "^16.4.5",
