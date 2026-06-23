@@ -1,6 +1,3 @@
-Dưới đây là nội dung file README.md hoàn chỉnh, được viết bằng Markdown để hiển thị đẹp trên GitHub. Bạn có thể sao chép và lưu thành README.md trong thư mục gốc của dự án.
-
-```markdown
 # 🚀 Chat System – Real‑Time Decentralized Chat with Node Sync
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -83,8 +80,8 @@ project/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/chat-system.git
-cd chat-system
+git clone https://github.com/2062007/centralized-ws-chat
+cd centralized-ws-chat
 ```
 
 2. Server setup
@@ -330,7 +327,7 @@ Distributed under the MIT License. See LICENSE for more information.
 
 ---
 
-🙏 Acknowledgements
+👀 Acknowledgements
 
 · better-sqlite3 – SQLite library for Node.js.
 · aiohttp – Async HTTP client for Python.
