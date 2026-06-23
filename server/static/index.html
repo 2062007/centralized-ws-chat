@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="login">
+    <h1>Login</h1>
+    <input id="username" placeholder="Username">
+    <input id="password" type="password" placeholder="Password">
+    <button id="loginBtn">Login</button>
+    <p><a href="#" id="registerLink">Register</a></p>
+  </div>
+  <div id="chat" style="display:none;">
+    <div id="rooms">
+      <h3>Rooms</h3>
+      <ul id="roomList"></ul>
+      <input id="newRoomName" placeholder="New room name">
+      <button id="createRoom">Create</button>
+      <div>
+        <input id="joinRoomId" placeholder="Room ID">
+        <input id="joinRoomPass" placeholder="Password (if private)">
+        <button id="joinRoom">Join</button>
+      </div>
+    </div>
+    <div id="messages">
+      <div id="messageArea"></div>
+      <input id="messageInput" placeholder="Type message...">
+      <button id="sendBtn">Send</button>
+      <div>
+        <input id="privateUser" placeholder="User ID for private">
+        <button id="sendPrivate">Send Private</button>
+      </div>
+    </div>
+  </div>
+  <script src="/chat.js"></script>
+</body>
+</html>
