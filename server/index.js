@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
@@ -20,23 +21,38 @@ app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/messages', msgRoutes);
 
-// Redirect HTTP to HTTPS (if needed)
-// For simplicity, we serve HTTPS directly
-
 const PORT = process.env.PORT || 443;
 
-// SSL options (self-signed or real certs)
-const options = {
-  key: fs.readFileSync(path.join(__dirname, 'certs', 'server.key')),
-  cert: fs.readFileSync(path.join(__dirname, 'certs', 'server.crt'))
-};
+// Kiểm tra sự tồn tại của chứng chỉ
+const certDir = path.join(__dirname, 'certs');
+const keyPath = path.join(certDir, 'server.key');
+const certPath = path.join(certDir, 'server.crt');
+const hasCert = fs.existsSync(keyPath) && fs.existsSync(certPath);
 
-const server = https.createServer(options, app);
+let server;
+let wss;
+
+if (hasCert) {
+  // Dùng HTTPS nếu có cert
+  const options = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath)
+  };
+  server = https.createServer(options, app);
+  console.log('🔒 HTTPS mode (cert found)');
+} else {
+  // Dùng HTTP nếu không có cert (trên Render)
+  server = http.createServer(app);
+  console.log('🌐 HTTP mode (no SSL cert)');
+}
 
 // WebSocket server
-const wss = new WebSocket.Server({ server });
+wss = new WebSocket.Server({ server });
 wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, `https://${req.headers.host}`);
+  // Xác định protocol thực tế (quan trọng nếu đứng sau proxy)
+  const proto = req.headers['x-forwarded-proto'] || (hasCert ? 'https' : 'http');
+  const host = req.headers.host;
+  const url = new URL(req.url, `${proto}://${host}`);
   const token = url.searchParams.get('token');
   const user = verifyToken(token);
   if (!user) {
@@ -48,5 +64,10 @@ wss.on('connection', (ws, req) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Server running on https://localhost:${PORT}`);
+  if (hasCert) {
+    console.log(`✅ HTTPS Server running on https://localhost:${PORT}`);
+  } else {
+    console.log(`✅ HTTP Server running on http://localhost:${PORT}`);
+  }
+  console.log(`Your app is live on port ${PORT}`);
 });
