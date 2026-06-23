@@ -13,6 +13,25 @@ const { handleConnection } = require('./websocket/handlers');
 const { verifyToken } = require('./auth');
 
 const app = express();
+
+// Middleware: log chi tiết từng request
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} - IP: ${req.ip}`);
+  next();
+});
+
+// Middleware: CORS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  next();
+});
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'static')));
 
@@ -33,7 +52,7 @@ let server;
 let wss;
 
 if (hasCert) {
-  // Dùng HTTPS nếu có cert
+  // HTTPS
   const options = {
     key: fs.readFileSync(keyPath),
     cert: fs.readFileSync(certPath)
@@ -41,26 +60,36 @@ if (hasCert) {
   server = https.createServer(options, app);
   console.log('🔒 HTTPS mode (cert found)');
 } else {
-  // Dùng HTTP nếu không có cert (trên Render)
+  // HTTP
   server = http.createServer(app);
   console.log('🌐 HTTP mode (no SSL cert)');
 }
 
 // WebSocket server
 wss = new WebSocket.Server({ server });
+
 wss.on('connection', (ws, req) => {
-  // Xác định protocol thực tế (quan trọng nếu đứng sau proxy)
   const proto = req.headers['x-forwarded-proto'] || (hasCert ? 'https' : 'http');
   const host = req.headers.host;
   const url = new URL(req.url, `${proto}://${host}`);
   const token = url.searchParams.get('token');
+
+  console.log(`[WS] Connection attempt from ${host}, token: ${token ? 'present' : 'missing'}`);
+
   const user = verifyToken(token);
   if (!user) {
+    console.log('[WS] Authentication failed – closing connection');
     ws.close(1008, 'Unauthorized');
     return;
   }
+
   ws.user = user;
+  console.log(`[WS] Authenticated as ${user.username} (ID: ${user.userId})`);
   handleConnection(ws, wss);
+});
+
+wss.on('error', (err) => {
+  console.error('[WS] Server error:', err);
 });
 
 server.listen(PORT, () => {
@@ -69,5 +98,5 @@ server.listen(PORT, () => {
   } else {
     console.log(`✅ HTTP Server running on http://localhost:${PORT}`);
   }
-  console.log(`Your app is live on port ${PORT}`);
+  console.log(`App live on port ${PORT}`);
 });
