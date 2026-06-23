@@ -4,6 +4,19 @@ let token;
 let currentRoomId = null;
 let username;
 
+// Chặn mọi hành vi submit (dự phòng)
+document.addEventListener('submit', (e) => {
+  e.preventDefault();
+  console.warn('⚠️ Submit event prevented');
+});
+
+// Chặn mọi click trên thẻ a có href="#"
+document.addEventListener('click', (e) => {
+  if (e.target.tagName === 'A' && e.target.getAttribute('href') === '#') {
+    e.preventDefault();
+  }
+});
+
 // Kiểm tra token trong localStorage
 const savedToken = localStorage.getItem('token');
 if (savedToken) {
@@ -16,7 +29,8 @@ if (savedToken) {
 }
 
 // Đăng nhập
-document.getElementById('loginBtn').addEventListener('click', async () => {
+document.getElementById('loginBtn').addEventListener('click', async (e) => {
+  e.preventDefault(); // chặn mọi hành vi mặc định
   const username = document.getElementById('username').value.trim();
   const password = document.getElementById('password').value;
   if (!username || !password) {
@@ -43,8 +57,26 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
       localStorage.setItem('username', username);
       document.getElementById('login').style.display = 'none';
       document.getElementById('chat').style.display = 'flex';
-      connectWebSocket();
-      loadRooms();
+
+      console.log('[Login] Kết nối WebSocket...');
+      try {
+        connectWebSocket();
+        console.log('[Login] WebSocket đã kết nối');
+      } catch (wsErr) {
+        console.error('[Login] Lỗi WebSocket:', wsErr);
+        alert('Lỗi kết nối WebSocket: ' + wsErr.message);
+        return;
+      }
+
+      console.log('[Login] Tải danh sách phòng...');
+      try {
+        await loadRooms();
+        console.log('[Login] Danh sách phòng đã tải');
+      } catch (roomsErr) {
+        console.error('[Login] Lỗi tải phòng:', roomsErr);
+        alert('Lỗi tải phòng: ' + roomsErr.message);
+        return;
+      }
     } else {
       alert(data.error || 'Đăng nhập thất bại');
     }
@@ -56,7 +88,7 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
 
 // Đăng ký
 document.getElementById('registerLink').addEventListener('click', async (e) => {
-  e.preventDefault();
+  e.preventDefault(); // chặn chuyển hướng
   const username = document.getElementById('username').value.trim();
   const password = document.getElementById('password').value;
   if (!username || !password) {
@@ -87,8 +119,10 @@ document.getElementById('registerLink').addEventListener('click', async (e) => {
   }
 });
 
-// Kết nối WebSocket
 function connectWebSocket() {
+  if (!token) {
+    throw new Error('Không có token');
+  }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.host;
   const wsUrl = `${protocol}//${host}/ws?token=${token}`;
@@ -114,7 +148,6 @@ function connectWebSocket() {
   ws.onerror = (err) => console.error('[WS] Lỗi:', err);
 }
 
-// Xử lý tin nhắn WebSocket
 function handleWsMessage(msg) {
   switch (msg.type) {
     case 'rooms':
@@ -138,7 +171,6 @@ function handleWsMessage(msg) {
   }
 }
 
-// Hiển thị danh sách phòng
 function renderRooms(rooms) {
   const list = document.getElementById('roomList');
   list.innerHTML = '';
@@ -151,7 +183,6 @@ function renderRooms(rooms) {
   });
 }
 
-// Tham gia phòng
 function joinRoom(roomId, password = null) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     alert('WebSocket chưa kết nối');
@@ -162,16 +193,16 @@ function joinRoom(roomId, password = null) {
   document.getElementById('messageArea').innerHTML = '';
 }
 
-// Sự kiện nút tham gia phòng
-document.getElementById('joinRoom').addEventListener('click', () => {
+document.getElementById('joinRoom').addEventListener('click', (e) => {
+  e.preventDefault();
   const roomId = parseInt(document.getElementById('joinRoomId').value);
   const password = document.getElementById('joinRoomPass').value;
   if (!roomId) return;
   joinRoom(roomId, password || undefined);
 });
 
-// Tạo phòng mới
-document.getElementById('createRoom').addEventListener('click', async () => {
+document.getElementById('createRoom').addEventListener('click', async (e) => {
+  e.preventDefault();
   const name = document.getElementById('newRoomName').value.trim();
   if (!name) {
     alert('Vui lòng nhập tên phòng');
@@ -201,26 +232,23 @@ document.getElementById('createRoom').addEventListener('click', async () => {
   }
 });
 
-// Tải danh sách phòng
-function loadRooms() {
-  fetch(API_BASE + '/rooms', {
+async function loadRooms() {
+  console.log('[LoadRooms] Đang tải...');
+  const res = await fetch(API_BASE + '/rooms', {
     headers: {
       'Authorization': 'Bearer ' + token,
       'Accept': 'application/json'
     }
-  })
-  .then(res => {
-    if (!res.ok) throw new Error('Không thể tải phòng');
-    return res.json();
-  })
-  .then(rooms => renderRooms(rooms))
-  .catch(err => {
-    console.error('[LoadRooms]', err);
-    alert('Lỗi tải phòng: ' + err.message);
   });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  const rooms = await res.json();
+  console.log('[LoadRooms] Đã tải', rooms.length, 'phòng');
+  renderRooms(rooms);
 }
 
-// Hiển thị tin nhắn
 function appendMessage(msg) {
   const area = document.getElementById('messageArea');
   const div = document.createElement('div');
@@ -230,8 +258,8 @@ function appendMessage(msg) {
   area.scrollTop = area.scrollHeight;
 }
 
-// Gửi tin nhắn công khai
-document.getElementById('sendBtn').addEventListener('click', () => {
+document.getElementById('sendBtn').addEventListener('click', (e) => {
+  e.preventDefault();
   const content = document.getElementById('messageInput').value.trim();
   if (!content || !currentRoomId) {
     alert('Hãy tham gia phòng trước');
@@ -245,8 +273,8 @@ document.getElementById('sendBtn').addEventListener('click', () => {
   document.getElementById('messageInput').value = '';
 });
 
-// Gửi tin nhắn riêng tư
-document.getElementById('sendPrivate').addEventListener('click', () => {
+document.getElementById('sendPrivate').addEventListener('click', (e) => {
+  e.preventDefault();
   const content = document.getElementById('messageInput').value.trim();
   const recipientId = parseInt(document.getElementById('privateUser').value);
   if (!content || !recipientId) {
@@ -261,7 +289,21 @@ document.getElementById('sendPrivate').addEventListener('click', () => {
   document.getElementById('messageInput').value = '';
 });
 
-// Gửi tin nhắn bằng phím Enter
 document.getElementById('messageInput').addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') document.getElementById('sendBtn').click();
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('sendBtn').click();
+  }
+});
+
+// Phím Enter trong các input khác không gây submit
+document.querySelectorAll('input').forEach(input => {
+  input.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // Tìm nút bấm gần nhất và click
+      const btn = input.parentElement.querySelector('button[type="button"]');
+      if (btn) btn.click();
+    }
+  });
 });
