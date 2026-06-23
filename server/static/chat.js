@@ -4,13 +4,8 @@ let token;
 let currentRoomId = null;
 let username;
 
-// Chặn mọi hành vi submit (dự phòng)
-document.addEventListener('submit', (e) => {
-  e.preventDefault();
-  console.warn('⚠️ Submit event prevented');
-});
-
-// Chặn mọi click trên thẻ a có href="#"
+// Chặn mọi submit và click thẻ a (dự phòng)
+document.addEventListener('submit', (e) => e.preventDefault());
 document.addEventListener('click', (e) => {
   if (e.target.tagName === 'A' && e.target.getAttribute('href') === '#') {
     e.preventDefault();
@@ -30,22 +25,19 @@ if (savedToken) {
 
 // Đăng nhập
 document.getElementById('loginBtn').addEventListener('click', async (e) => {
-  e.preventDefault(); // chặn mọi hành vi mặc định
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
-  if (!username || !password) {
+  e.preventDefault();
+  const inputUsername = document.getElementById('username').value.trim();
+  const inputPassword = document.getElementById('password').value;
+  if (!inputUsername || !inputPassword) {
     alert('Vui lòng nhập tên đăng nhập và mật khẩu');
     return;
   }
   try {
-    console.log('[Login] Gửi POST tới', API_BASE + '/auth/login');
+    console.log('[Login] POST /api/auth/login');
     const res = await fetch(API_BASE + '/auth/login', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify({ username, password })
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ username: inputUsername, password: inputPassword })
     });
     console.log('[Login] Status:', res.status);
     const data = await res.json();
@@ -57,53 +49,32 @@ document.getElementById('loginBtn').addEventListener('click', async (e) => {
       localStorage.setItem('username', username);
       document.getElementById('login').style.display = 'none';
       document.getElementById('chat').style.display = 'flex';
-
-      console.log('[Login] Kết nối WebSocket...');
-      try {
-        connectWebSocket();
-        console.log('[Login] WebSocket đã kết nối');
-      } catch (wsErr) {
-        console.error('[Login] Lỗi WebSocket:', wsErr);
-        alert('Lỗi kết nối WebSocket: ' + wsErr.message);
-        return;
-      }
-
-      console.log('[Login] Tải danh sách phòng...');
-      try {
-        await loadRooms();
-        console.log('[Login] Danh sách phòng đã tải');
-      } catch (roomsErr) {
-        console.error('[Login] Lỗi tải phòng:', roomsErr);
-        alert('Lỗi tải phòng: ' + roomsErr.message);
-        return;
-      }
+      connectWebSocket();
+      loadRooms();
     } else {
       alert(data.error || 'Đăng nhập thất bại');
     }
   } catch (err) {
-    console.error('[Login] Lỗi fetch:', err);
+    console.error('[Login] Lỗi:', err);
     alert('Lỗi kết nối: ' + err.message);
   }
 });
 
 // Đăng ký
 document.getElementById('registerLink').addEventListener('click', async (e) => {
-  e.preventDefault(); // chặn chuyển hướng
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
-  if (!username || !password) {
+  e.preventDefault();
+  const inputUsername = document.getElementById('username').value.trim();
+  const inputPassword = document.getElementById('password').value;
+  if (!inputUsername || !inputPassword) {
     alert('Vui lòng nhập tên đăng nhập và mật khẩu');
     return;
   }
   try {
-    console.log('[Register] Gửi POST tới', API_BASE + '/auth/register');
+    console.log('[Register] POST /api/auth/register');
     const res = await fetch(API_BASE + '/auth/register', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify({ username, password })
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ username: inputUsername, password: inputPassword })
     });
     console.log('[Register] Status:', res.status);
     const data = await res.json();
@@ -114,38 +85,44 @@ document.getElementById('registerLink').addEventListener('click', async (e) => {
       alert(data.error || 'Đăng ký thất bại');
     }
   } catch (err) {
-    console.error('[Register] Lỗi fetch:', err);
+    console.error('[Register] Lỗi:', err);
     alert('Lỗi kết nối: ' + err.message);
   }
 });
 
 function connectWebSocket() {
   if (!token) {
-    throw new Error('Không có token');
+    console.error('[WS] Không có token');
+    return;
   }
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.host;
-  const wsUrl = `${protocol}//${host}/ws?token=${token}`;
-  console.log('[WS] Đang kết nối tới', wsUrl);
-  ws = new WebSocket(wsUrl);
-  ws.onopen = () => console.log('[WS] Đã kết nối');
-  ws.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      handleWsMessage(msg);
-    } catch (e) {
-      console.error('[WS] Lỗi parse:', e);
-    }
-  };
-  ws.onclose = () => {
-    console.log('[WS] Đã đóng');
-    setTimeout(() => {
-      if (token && document.getElementById('chat').style.display !== 'none') {
-        connectWebSocket();
+  try {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const wsUrl = `${protocol}//${host}/ws?token=${token}`;
+    console.log('[WS] Kết nối tới', wsUrl);
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => console.log('[WS] Đã kết nối');
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleWsMessage(msg);
+      } catch (parseErr) {
+        console.error('[WS] Parse lỗi:', parseErr);
       }
-    }, 3000);
-  };
-  ws.onerror = (err) => console.error('[WS] Lỗi:', err);
+    };
+    ws.onclose = () => {
+      console.log('[WS] Đã đóng');
+      setTimeout(() => {
+        if (token && document.getElementById('chat').style.display !== 'none') {
+          connectWebSocket();
+        }
+      }, 3000);
+    };
+    ws.onerror = (err) => console.error('[WS] Lỗi:', err);
+  } catch (err) {
+    console.error('[WS] Lỗi tạo WebSocket:', err);
+    throw err;
+  }
 }
 
 function handleWsMessage(msg) {
@@ -233,20 +210,25 @@ document.getElementById('createRoom').addEventListener('click', async (e) => {
 });
 
 async function loadRooms() {
-  console.log('[LoadRooms] Đang tải...');
-  const res = await fetch(API_BASE + '/rooms', {
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Accept': 'application/json'
+  try {
+    console.log('[LoadRooms] Đang tải...');
+    const res = await fetch(API_BASE + '/rooms', {
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/json'
+      }
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text}`);
     }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`HTTP ${res.status}: ${text}`);
+    const rooms = await res.json();
+    console.log('[LoadRooms] Đã tải', rooms.length, 'phòng');
+    renderRooms(rooms);
+  } catch (err) {
+    console.error('[LoadRooms] Lỗi:', err);
+    alert('Lỗi tải phòng: ' + err.message);
   }
-  const rooms = await res.json();
-  console.log('[LoadRooms] Đã tải', rooms.length, 'phòng');
-  renderRooms(rooms);
 }
 
 function appendMessage(msg) {
@@ -289,21 +271,20 @@ document.getElementById('sendPrivate').addEventListener('click', (e) => {
   document.getElementById('messageInput').value = '';
 });
 
-document.getElementById('messageInput').addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    document.getElementById('sendBtn').click();
-  }
-});
-
-// Phím Enter trong các input khác không gây submit
+// Xử lý phím Enter
 document.querySelectorAll('input').forEach(input => {
   input.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      // Tìm nút bấm gần nhất và click
-      const btn = input.parentElement.querySelector('button[type="button"]');
-      if (btn) btn.click();
+      // Tìm nút bấm gần nhất (cho các ô input trong cùng container)
+      const btn = input.closest('div')?.querySelector('button[type="button"]');
+      if (btn) {
+        btn.click();
+      } else if (input.id === 'messageInput') {
+        document.getElementById('sendBtn').click();
+      } else if (input.id === 'username' || input.id === 'password') {
+        document.getElementById('loginBtn').click();
+      }
     }
   });
 });
