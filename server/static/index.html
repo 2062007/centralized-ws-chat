@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="vi">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,34 +8,36 @@
 </head>
 <body>
   <div id="login">
-    <h1>Login</h1>
-    <input id="username" placeholder="Username" autofocus>
-    <input id="password" type="password" placeholder="Password">
-    <button id="loginBtn">Login</button>
-    <p><a href="#" id="registerLink">Register</a></p>
+    <h1>Đăng nhập</h1>
+    <input id="username" placeholder="Tên đăng nhập" autofocus>
+    <input id="password" type="password" placeholder="Mật khẩu">
+    <button id="loginBtn" type="button">Đăng nhập</button>
+    <p><a href="#" id="registerLink">Đăng ký</a></p>
   </div>
+
   <div id="chat" style="display:none;">
     <div id="rooms">
-      <h3>Rooms</h3>
+      <h3>Phòng</h3>
       <ul id="roomList"></ul>
-      <input id="newRoomName" placeholder="New room name">
-      <button id="createRoom">Create</button>
+      <input id="newRoomName" placeholder="Tên phòng mới">
+      <button id="createRoom" type="button">Tạo phòng</button>
       <div>
-        <input id="joinRoomId" placeholder="Room ID">
-        <input id="joinRoomPass" placeholder="Password (if private)">
-        <button id="joinRoom">Join</button>
+        <input id="joinRoomId" placeholder="ID phòng">
+        <input id="joinRoomPass" placeholder="Mật khẩu (nếu có)">
+        <button id="joinRoom" type="button">Tham gia</button>
       </div>
     </div>
     <div id="messages">
       <div id="messageArea"></div>
-      <input id="messageInput" placeholder="Type message...">
-      <button id="sendBtn">Send</button>
+      <input id="messageInput" placeholder="Nhập tin nhắn...">
+      <button id="sendBtn" type="button">Gửi</button>
       <div>
-        <input id="privateUser" placeholder="User ID for private">
-        <button id="sendPrivate">Send Private</button>
+        <input id="privateUser" placeholder="ID người nhận">
+        <button id="sendPrivate" type="button">Gửi riêng</button>
       </div>
     </div>
   </div>
+
   <script src="/chat.js"></script>
 </body>
 </html>
