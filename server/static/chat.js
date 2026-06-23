@@ -9,7 +9,6 @@ const savedToken = localStorage.getItem('token');
 if (savedToken) {
   token = savedToken;
   username = localStorage.getItem('username') || '';
-  // Hiện chat, ẩn login
   document.getElementById('login').style.display = 'none';
   document.getElementById('chat').style.display = 'flex';
   connectWebSocket();
@@ -25,12 +24,18 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
     return;
   }
   try {
+    console.log('[Login] Sending POST to', API_BASE + '/auth/login');
     const res = await fetch(API_BASE + '/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({ username, password })
     });
+    console.log('[Login] Status:', res.status);
     const data = await res.json();
+    console.log('[Login] Data:', data);
     if (res.ok) {
       token = data.token;
       username = data.username;
@@ -44,6 +49,7 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
       alert(data.error || 'Login failed');
     }
   } catch (err) {
+    console.error('[Login] Fetch error:', err);
     alert('Network error: ' + err.message);
   }
 });
@@ -57,18 +63,25 @@ document.getElementById('registerLink').addEventListener('click', async (e) => {
     return;
   }
   try {
+    console.log('[Register] Sending POST to', API_BASE + '/auth/register');
     const res = await fetch(API_BASE + '/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({ username, password })
     });
+    console.log('[Register] Status:', res.status);
     const data = await res.json();
+    console.log('[Register] Data:', data);
     if (res.ok) {
       alert('Registered! Please login.');
     } else {
       alert(data.error || 'Registration failed');
     }
   } catch (err) {
+    console.error('[Register] Fetch error:', err);
     alert('Network error: ' + err.message);
   }
 });
@@ -77,26 +90,26 @@ function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.host;
   const wsUrl = `${protocol}//${host}/ws?token=${token}`;
-  console.log('Connecting to WebSocket:', wsUrl);
+  console.log('[WS] Connecting to', wsUrl);
   ws = new WebSocket(wsUrl);
+  ws.onopen = () => console.log('[WS] Connected');
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       handleWsMessage(msg);
     } catch (e) {
-      console.error('Invalid message:', e);
+      console.error('[WS] Parse error:', e);
     }
   };
   ws.onclose = () => {
-    console.log('WebSocket closed');
-    // Tự động reconnect sau 3s
+    console.log('[WS] Closed');
     setTimeout(() => {
       if (token && document.getElementById('chat').style.display !== 'none') {
         connectWebSocket();
       }
     }, 3000);
   };
-  ws.onerror = (err) => console.error('WebSocket error:', err);
+  ws.onerror = (err) => console.error('[WS] Error:', err);
 }
 
 function handleWsMessage(msg) {
@@ -118,7 +131,7 @@ function handleWsMessage(msg) {
       alert(msg.message);
       break;
     default:
-      console.log('Unknown message type:', msg);
+      console.log('[WS] Unknown type:', msg);
   }
 }
 
@@ -162,7 +175,11 @@ document.getElementById('createRoom').addEventListener('click', async () => {
   try {
     const res = await fetch(API_BASE + '/rooms', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': 'Bearer ' + token 
+      },
       body: JSON.stringify({ name, is_public: isPublic, password })
     });
     const data = await res.json();
@@ -179,7 +196,10 @@ document.getElementById('createRoom').addEventListener('click', async () => {
 
 function loadRooms() {
   fetch(API_BASE + '/rooms', {
-    headers: { 'Authorization': 'Bearer ' + token }
+    headers: { 
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'application/json'
+    }
   })
   .then(res => {
     if (!res.ok) throw new Error('Failed to load rooms');
@@ -187,7 +207,7 @@ function loadRooms() {
   })
   .then(rooms => renderRooms(rooms))
   .catch(err => {
-    console.error(err);
+    console.error('[LoadRooms]', err);
     alert('Error loading rooms: ' + err.message);
   });
 }
@@ -230,10 +250,6 @@ document.getElementById('sendPrivate').addEventListener('click', () => {
   document.getElementById('messageInput').value = '';
 });
 
-// Enter key for message input
 document.getElementById('messageInput').addEventListener('keypress', (e) => {
   if (e.key === 'Enter') document.getElementById('sendBtn').click();
 });
-
-// Logout (optional) – clear localStorage
-// Có thể thêm nút logout nếu muốn
