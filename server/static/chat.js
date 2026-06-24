@@ -4,7 +4,7 @@ let token;
 let currentRoomId = null;
 let username;
 
-// Chặn mọi submit và click thẻ a (dự phòng)
+// Chặn mọi submit và click thẻ a
 document.addEventListener('submit', (e) => e.preventDefault());
 document.addEventListener('click', (e) => {
   if (e.target.tagName === 'A' && e.target.getAttribute('href') === '#') {
@@ -168,6 +168,7 @@ function joinRoom(roomId, password = null) {
   ws.send(JSON.stringify({ type: 'join_room', roomId, password }));
   currentRoomId = roomId;
   document.getElementById('messageArea').innerHTML = '';
+  alert(`✅ Đã tham gia phòng ${roomId}`);
 }
 
 document.getElementById('joinRoom').addEventListener('click', (e) => {
@@ -199,7 +200,7 @@ document.getElementById('createRoom').addEventListener('click', async (e) => {
     });
     const data = await res.json();
     if (res.ok) {
-      alert('Phòng đã được tạo!');
+      alert(`✅ Phòng đã được tạo! ID: ${data.id}`);
       loadRooms();
     } else {
       alert(data.error || 'Tạo phòng thất bại');
@@ -235,7 +236,21 @@ function appendMessage(msg) {
   const area = document.getElementById('messageArea');
   const div = document.createElement('div');
   div.className = 'message' + (msg.isPrivate ? ' private' : '');
-  div.textContent = `${msg.username}: ${msg.content} (${new Date(msg.timestamp).toLocaleTimeString()})`;
+  
+  // Xử lý timestamp an toàn
+  let timeStr = '';
+  try {
+    const date = new Date(msg.timestamp);
+    if (!isNaN(date.getTime())) {
+      timeStr = date.toLocaleTimeString();
+    } else {
+      timeStr = new Date().toLocaleTimeString();
+    }
+  } catch (e) {
+    timeStr = new Date().toLocaleTimeString();
+  }
+  
+  div.textContent = `${msg.username}: ${msg.content} (${timeStr})`;
   area.appendChild(div);
   area.scrollTop = area.scrollHeight;
 }
@@ -276,7 +291,6 @@ document.querySelectorAll('input').forEach(input => {
   input.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      // Tìm nút bấm gần nhất (cho các ô input trong cùng container)
       const btn = input.closest('div')?.querySelector('button[type="button"]');
       if (btn) {
         btn.click();
