@@ -19,8 +19,6 @@ function broadcastToRoom(roomId, message, excludeUserId = null) {
 }
 
 function broadcastToNodeClients(message) {
-  // Send to all clients that have node mode enabled (we track separately)
-  // For simplicity, we assume all clients may be nodes; we'll send a special event.
   for (const [userId, ws] of clients) {
     if (ws.readyState === 1 && ws.isNode) {
       ws.send(JSON.stringify(message));
@@ -33,16 +31,14 @@ function handleConnection(ws, wss) {
   const userId = user.userId;
   const username = user.username;
 
-  // Store client
   clients.set(userId, ws);
-  ws.isNode = false; // default
+  ws.isNode = false;
 
-  // Send initial room list
+  // Gửi danh sách phòng công khai
   const roomStmt = db.prepare('SELECT id, name, is_public FROM rooms WHERE is_public = 1');
   const publicRooms = roomStmt.all();
   ws.send(JSON.stringify({ type: 'rooms', data: publicRooms }));
 
-  // Handle incoming messages
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);
@@ -53,33 +49,37 @@ function handleConnection(ws, wss) {
           const { roomId, password } = msg;
           const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId);
           if (!room) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
+            ws.send(JSON.stringify({ type: 'error', message: 'Phòng không tồn tại' }));
             return;
           }
           if (!room.is_public) {
-            // verify password (simplified, we already checked in REST, but do again)
             if (!password) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Password required' }));
+              ws.send(JSON.stringify({ type: 'error', message: 'Yêu cầu mật khẩu' }));
               return;
             }
             const bcrypt = require('bcrypt');
             const match = await bcrypt.compare(password, room.password_hash);
             if (!match) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Incorrect password' }));
+              ws.send(JSON.stringify({ type: 'error', message: 'Sai mật khẩu' }));
               return;
             }
           }
-          // Add to room
+          // Tham gia phòng
           if (!rooms.has(roomId)) rooms.set(roomId, new Set());
           rooms.get(roomId).add(userId);
-          // Send past messages (last 50)
+
+          // Lấy 50 tin nhắn gần nhất và chuyển timestamp sang ISO
           const pastStmt = db.prepare(`
             SELECT m.id, m.content, m.timestamp, u.username 
             FROM messages m JOIN users u ON m.user_id = u.id 
             WHERE m.room_id = ? AND m.is_private = 0 
             ORDER BY m.timestamp DESC LIMIT 50
           `);
-          const past = pastStmt.all(roomId).reverse();
+          const past = pastStmt.all(roomId).map(m => ({
+            ...m,
+            timestamp: new Date(m.timestamp).toISOString()
+          })).reverse();
+
           ws.send(JSON.stringify({ type: 'history', roomId, data: past }));
           break;
         }
@@ -95,27 +95,26 @@ function handleConnection(ws, wss) {
         case 'send_message': {
           const { roomId, content, isPrivate = false, recipientId = null } = msg;
           if (!content) return;
-          // Check if user is banned
+
+          // Kiểm tra banned
           const userRow = db.prepare('SELECT is_banned FROM users WHERE id = ?').get(userId);
           if (userRow.is_banned) {
-            ws.send(JSON.stringify({ type: 'error', message: 'You are banned' }));
+            ws.send(JSON.stringify({ type: 'error', message: 'Bạn đã bị cấm' }));
             return;
           }
 
-          // Moderation with Gemini
+          // Moderation
           const isNegative = await moderate(content);
           if (isNegative) {
-            // Increment ban_count
             db.prepare('UPDATE users SET ban_count = ban_count + 1 WHERE id = ?').run(userId);
             const banInfo = db.prepare('SELECT ban_count FROM users WHERE id = ?').get(userId);
             if (banInfo.ban_count >= 3) {
               db.prepare('UPDATE users SET is_banned = 1 WHERE id = ?').run(userId);
-              ws.send(JSON.stringify({ type: 'error', message: 'You have been banned for toxic behavior' }));
+              ws.send(JSON.stringify({ type: 'error', message: 'Bạn đã bị cấm vì nội dung độc hại' }));
               return;
             } else {
-              ws.send(JSON.stringify({ type: 'warning', message: 'Message flagged as negative. Ban count: ' + banInfo.ban_count }));
-              // Still allow message? According to requirement, auto ban after 3, but messages are still sent? We'll block this one.
-              return; // drop message
+              ws.send(JSON.stringify({ type: 'warning', message: 'Tin nhắn bị gắn cờ tiêu cực. Số lần: ' + banInfo.ban_count }));
+              return;
             }
           }
 
@@ -142,9 +141,8 @@ function handleConnection(ws, wss) {
             recipientId
           };
 
-          // Broadcast to room (or private)
+          // Broadcast
           if (isPrivate) {
-            // Send to both sender and recipient
             const targetIds = [userId, recipientId];
             for (const id of targetIds) {
               const targetWs = clients.get(id);
@@ -156,7 +154,7 @@ function handleConnection(ws, wss) {
             broadcastToRoom(roomId, { type: 'message', data: messageData }, userId);
           }
 
-          // If we have node clients, encrypt and broadcast to them
+          // Node sync
           const encrypted = encryptForNode(JSON.stringify(messageData));
           broadcastToNodeClients({ type: 'node_sync', data: encrypted });
           break;
@@ -165,15 +163,10 @@ function handleConnection(ws, wss) {
         case 'node_mode': {
           const { enabled } = msg;
           ws.isNode = !!enabled;
-          if (enabled) {
-            // Send initial sync? Optionally.
-          }
           break;
         }
 
         case 'node_sync': {
-          // Node client sends encrypted data (which it stored from previous broadcasts)
-          // We save it to database for restore
           const { encryptedData } = msg;
           if (encryptedData) {
             saveNodeData(userId, encryptedData);
@@ -183,9 +176,6 @@ function handleConnection(ws, wss) {
         }
 
         case 'node_restore_request': {
-          // Server requests node client to send its stored data
-          // The client should respond with node_sync containing its data
-          // We will send a request message
           ws.send(JSON.stringify({ type: 'node_restore_request' }));
           break;
         }
@@ -195,13 +185,12 @@ function handleConnection(ws, wss) {
       }
     } catch (err) {
       console.error('WebSocket error:', err);
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid message' }));
+      ws.send(JSON.stringify({ type: 'error', message: 'Tin nhắn không hợp lệ' }));
     }
   });
 
   ws.on('close', () => {
     clients.delete(userId);
-    // Remove from all rooms
     for (const [roomId, set] of rooms) {
       set.delete(userId);
     }
