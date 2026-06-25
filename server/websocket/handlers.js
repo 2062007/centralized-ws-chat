@@ -2,9 +2,7 @@ const db = require('../db');
 const { moderate } = require('../gemini');
 const { encryptForNode, saveNodeData } = require('../node');
 
-// Store active connections: userId -> WebSocket
 const clients = new Map();
-// Store room participants: roomId -> Set of userIds
 const rooms = new Map();
 
 function broadcastToRoom(roomId, message, excludeUserId = null) {
@@ -34,7 +32,6 @@ function handleConnection(ws, wss) {
   clients.set(userId, ws);
   ws.isNode = false;
 
-  // Gửi danh sách phòng công khai
   const roomStmt = db.prepare('SELECT id, name, is_public FROM rooms WHERE is_public = 1');
   const publicRooms = roomStmt.all();
   ws.send(JSON.stringify({ type: 'rooms', data: publicRooms }));
@@ -64,11 +61,9 @@ function handleConnection(ws, wss) {
               return;
             }
           }
-          // Tham gia phòng
           if (!rooms.has(roomId)) rooms.set(roomId, new Set());
           rooms.get(roomId).add(userId);
 
-          // Lấy 50 tin nhắn gần nhất và chuyển timestamp sang ISO
           const pastStmt = db.prepare(`
             SELECT m.id, m.content, m.timestamp, u.username 
             FROM messages m JOIN users u ON m.user_id = u.id 
@@ -96,14 +91,12 @@ function handleConnection(ws, wss) {
           const { roomId, content, isPrivate = false, recipientId = null } = msg;
           if (!content) return;
 
-          // Kiểm tra banned
           const userRow = db.prepare('SELECT is_banned FROM users WHERE id = ?').get(userId);
           if (userRow.is_banned) {
             ws.send(JSON.stringify({ type: 'error', message: 'Bạn đã bị cấm' }));
             return;
           }
 
-          // Moderation
           const isNegative = await moderate(content);
           if (isNegative) {
             db.prepare('UPDATE users SET ban_count = ban_count + 1 WHERE id = ?').run(userId);
@@ -118,7 +111,6 @@ function handleConnection(ws, wss) {
             }
           }
 
-          // Insert message
           const insertStmt = db.prepare(`
             INSERT INTO messages (room_id, user_id, content, is_private, recipient_id)
             VALUES (?, ?, ?, ?, ?)
@@ -141,7 +133,6 @@ function handleConnection(ws, wss) {
             recipientId
           };
 
-          // Broadcast
           if (isPrivate) {
             const targetIds = [userId, recipientId];
             for (const id of targetIds) {
@@ -151,10 +142,10 @@ function handleConnection(ws, wss) {
               }
             }
           } else {
-            broadcastToRoom(roomId, { type: 'message', data: messageData }, userId);
+            // ✅ KHÔNG loại trừ userId để người gửi cũng nhận được tin nhắn
+            broadcastToRoom(roomId, { type: 'message', data: messageData });
           }
 
-          // Node sync
           const encrypted = encryptForNode(JSON.stringify(messageData));
           broadcastToNodeClients({ type: 'node_sync', data: encrypted });
           break;
