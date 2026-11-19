@@ -37,6 +37,51 @@ async def resolve_server_url():
     return normalize_url(url)
 
 
+async def recover_server(auth):
+    """Server mất tài khoản (vd. Render reset DB): dùng token đã lưu để node gửi backup lên trước,
+    server sẽ khôi phục user/phòng/tin nhắn từ đó. Trả về True nếu có gửi được."""
+    info = auth.recovery_info()
+    node = NodeManager(info[2]) if info else None
+    if not info or not node.enabled or node.count() == 0:
+        if node:
+            node.close()
+        return False
+    token, user_id, username = info
+    ws = WSClient(token, username, user_id, auth.server_url)
+    counts = {}
+    try:
+        print(f"{Fore.YELLOW}Server không còn tài khoản — thử khôi phục từ node backup ({node.count()} bản ghi)...{Style.RESET_ALL}")
+        await ws.connect()
+        await ws.send({"type": "node_mode", "enabled": True})
+        sender = asyncio.create_task(node.send_sync(ws))
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 60
+        quiet_until = None
+        while loop.time() < deadline:
+            wait = 2.0 if sender.done() else 5.0
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=wait)
+            except asyncio.TimeoutError:
+                if sender.done():
+                    break
+                continue
+            t = msg.get("type")
+            if t == "__closed__":
+                print(f"{Fore.RED}Server từ chối token đã lưu (hết hạn 7 ngày hoặc sai JWT_SECRET).{Style.RESET_ALL}")
+                return False
+            if t == "node_sync_ack":
+                k = msg.get("result") or ("ok" if msg.get("restored") else "dup")
+                counts[k] = counts.get(k, 0) + 1
+        print(f"Kết quả khôi phục: {counts or 'server không phản hồi'}")
+        return counts.get("ok", 0) > 0
+    except Exception as exc:
+        print(f"{Fore.RED}Không khôi phục được: {exc}{Style.RESET_ALL}")
+        return False
+    finally:
+        await ws.close()
+        node.close()
+
+
 async def main():
     auth = AuthManager(await resolve_server_url())
 
@@ -48,6 +93,16 @@ async def main():
                 break
             if await auth.load_and_login(master):
                 logged_in = True
+                break
+            # Mật khẩu đã lưu đúng nhưng server báo sai thông tin = server đã bị reset, mất tài khoản
+            if auth.creds_ok and auth.last_status == 401:
+                if await recover_server(auth) and await auth.retry_login():
+                    logged_in = True
+                    break
+                ans = (await ainput("Tài khoản chưa có trên server. Đăng ký lại bằng thông tin đã lưu? (Y/n): ")).strip().lower()
+                if ans != "n" and await auth.register_saved() and await auth.retry_login():
+                    logged_in = True
+                    break
                 break
         if not logged_in:
             if (await ainput("Xoá thông tin đăng nhập đã lưu? (y/N): ")).strip().lower() == "y":

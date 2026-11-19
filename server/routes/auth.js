@@ -28,6 +28,16 @@ router.post('/register', async (req, res) => {
 
   try {
     const hashed = await hashPassword(password);
+    // Tài khoản tạm dựng lại từ backup (server từng bị reset): đăng ký đúng username để nhận lại lịch sử.
+    // Tắt bằng ALLOW_CLAIM_PLACEHOLDER=0.
+    if (process.env.ALLOW_CLAIM_PLACEHOLDER !== '0') {
+      const ph = db.prepare('SELECT id FROM users WHERE username = ? AND is_placeholder = 1').get(name);
+      if (ph) {
+        db.prepare('UPDATE users SET password_hash = ?, is_placeholder = 0 WHERE id = ?').run(hashed, ph.id);
+        backupUser(ph.id);
+        return res.status(201).json({ id: ph.id, username: name, recovered: true });
+      }
+    }
     const info = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(name, hashed);
     backupUser(Number(info.lastInsertRowid)); // gửi backup user mới cho các node
     res.status(201).json({ id: Number(info.lastInsertRowid), username: name });

@@ -1,4 +1,5 @@
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const db = require('../db');
 const { moderate } = require('../gemini');
 const { encryptForNode, decryptFromNode } = require('../node');
@@ -86,19 +87,19 @@ function roomPayload(r) {
 
 // Gửi tức thì cho mọi node khi có user / phòng mới hoặc đổi trạng thái (đăng ký, tạo phòng, bị cấm)
 function backupUser(userId) {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  const u = db.prepare('SELECT * FROM users WHERE id = ? AND is_placeholder = 0').get(userId);
   if (u) broadcastToNodeClients(nodeEvent(userPayload(u)));
 }
 
 function backupRoom(roomId) {
-  const r = db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId);
+  const r = db.prepare('SELECT * FROM rooms WHERE id = ? AND is_placeholder = 0').get(roomId);
   if (r) broadcastToNodeClients(nodeEvent(roomPayload(r)));
 }
 
 // Gửi TOÀN BỘ dữ liệu mã hoá xuống node: users, rooms rồi tin nhắn (theo lượt)
 function sendFullSnapshot(ws) {
-  for (const u of db.prepare('SELECT * FROM users ORDER BY id').all()) sendNodeBlob(ws, userPayload(u));
-  for (const r of db.prepare('SELECT * FROM rooms ORDER BY id').all()) sendNodeBlob(ws, roomPayload(r));
+  for (const u of db.prepare('SELECT * FROM users WHERE is_placeholder = 0 ORDER BY id').all()) sendNodeBlob(ws, userPayload(u));
+  for (const r of db.prepare('SELECT * FROM rooms WHERE is_placeholder = 0 ORDER BY id').all()) sendNodeBlob(ws, roomPayload(r));
   sendCatchup(ws, 0);
 }
 
@@ -191,32 +192,81 @@ const sqlTime = (t) => {
   return isNaN(d) || t == null ? null : d.toISOString().replace('T', ' ').slice(0, 19);
 };
 
-// Khôi phục tài khoản (bỏ qua nếu đã có id hoặc trùng username)
+// Mã kết quả khôi phục: ok | dup | invalid | no_user | no_room
+// Hash không thể đăng nhập, dùng cho tài khoản tạm (tính 1 lần)
+let lockedHash = null;
+function getLockedHash() {
+  if (!lockedHash) lockedHash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
+  return lockedHash;
+}
+
+// Backup tin nhắn cũ không kèm user/phòng: dựng tài khoản/phòng "tạm" để vẫn giữ được lịch sử.
+// Người dùng đăng ký lại đúng username sẽ nhận lại tài khoản tạm (xem routes/auth.js).
+function ensureUser(id, name) {
+  if (!isInt(id)) return false;
+  if (db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) return true;
+  let uname = typeof name === 'string' && /^[\p{L}\p{N}_.-]{3,32}$/u.test(name) ? name : `user${id}`;
+  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(uname)) uname = `${uname.slice(0, 26)}#${id}`;
+  const info = db.prepare(
+    'INSERT OR IGNORE INTO users (id, username, password_hash, is_placeholder) VALUES (?, ?, ?, 1)'
+  ).run(id, uname, getLockedHash());
+  return info.changes > 0 || !!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id);
+}
+
+function ensureRoom(id) {
+  if (!isInt(id)) return false;
+  if (db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(id)) return true;
+  db.prepare("INSERT OR IGNORE INTO rooms (id, name, is_public, is_placeholder) VALUES (?, ?, 1, 1)").run(id, `Phòng ${id}`);
+  return !!db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(id);
+}
+
+// Khôi phục tài khoản. Bản ghi tạm cùng id được ghi đè bằng dữ liệu thật.
 function restoreUser(u) {
-  if (!isInt(u.id) || typeof u.username !== 'string' || !u.username) return false;
-  if (typeof u.password_hash !== 'string' || !u.password_hash.startsWith('$2')) return false;
-  const info = db.prepare(`
-    INSERT OR IGNORE INTO users (id, username, password_hash, is_banned, ban_count, created_at)
-    VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
-  `).run(u.id, u.username, u.password_hash, u.is_banned ? 1 : 0, isInt(u.ban_count) ? u.ban_count : 0, sqlTime(u.created_at));
-  return info.changes > 0;
+  if (!isInt(u.id) || typeof u.username !== 'string' || !u.username) return 'invalid';
+  if (typeof u.password_hash !== 'string' || !u.password_hash.startsWith('$2')) return 'invalid';
+  const existing = db.prepare('SELECT is_placeholder FROM users WHERE id = ?').get(u.id);
+  if (existing && !existing.is_placeholder) return 'dup';
+  const banned = u.is_banned ? 1 : 0;
+  const bans = isInt(u.ban_count) ? u.ban_count : 0;
+  try {
+    if (existing) {
+      db.prepare('UPDATE users SET username = ?, password_hash = ?, is_banned = ?, ban_count = ?, is_placeholder = 0 WHERE id = ?')
+        .run(u.username, u.password_hash, banned, bans, u.id);
+      return 'ok';
+    }
+    const info = db.prepare(`
+      INSERT OR IGNORE INTO users (id, username, password_hash, is_banned, ban_count, created_at)
+      VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+    `).run(u.id, u.username, u.password_hash, banned, bans, sqlTime(u.created_at));
+    return info.changes > 0 ? 'ok' : 'dup';
+  } catch (e) {
+    return 'invalid'; // vd. trùng username với tài khoản khác
+  }
 }
 
 // Khôi phục phòng (created_by trỏ tới user không còn thì để NULL)
 function restoreRoom(r) {
-  if (!isInt(r.id) || typeof r.name !== 'string' || !r.name) return false;
+  if (!isInt(r.id) || typeof r.name !== 'string' || !r.name) return 'invalid';
   const isPublic = r.is_public ? 1 : 0;
-  if (!isPublic && typeof r.password_hash !== 'string') return false;
+  if (!isPublic && typeof r.password_hash !== 'string') return 'invalid';
+  const existing = db.prepare('SELECT is_placeholder FROM rooms WHERE id = ?').get(r.id);
+  if (existing && !existing.is_placeholder) return 'dup';
   const creator = isInt(r.created_by) && db.prepare('SELECT 1 FROM users WHERE id = ?').get(r.created_by) ? r.created_by : null;
+  const pw = isPublic ? null : r.password_hash;
+  if (existing) {
+    db.prepare('UPDATE rooms SET name = ?, is_public = ?, password_hash = ?, created_by = ?, is_placeholder = 0 WHERE id = ?')
+      .run(r.name.slice(0, 64), isPublic, pw, creator, r.id);
+    return 'ok';
+  }
   const info = db.prepare(`
     INSERT OR IGNORE INTO rooms (id, name, is_public, password_hash, created_by, created_at)
     VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
-  `).run(r.id, r.name.slice(0, 64), isPublic, isPublic ? null : r.password_hash, creator, sqlTime(r.created_at));
-  return info.changes > 0;
+  `).run(r.id, r.name.slice(0, 64), isPublic, pw, creator, sqlTime(r.created_at));
+  return info.changes > 0 ? 'ok' : 'dup';
 }
 
 function restoreBlob(obj) {
-  if (!obj || typeof obj !== 'object') return false;
+  if (!obj || typeof obj !== 'object') return 'invalid';
   if (obj.kind === 'user') return restoreUser(obj);
   if (obj.kind === 'room') return restoreRoom(obj);
   return restoreMessage(obj); // kind = 'message' hoặc blob cũ chưa có kind
@@ -224,33 +274,30 @@ function restoreBlob(obj) {
 
 // Khôi phục 1 tin nhắn từ blob của node (đã xác thực bằng GCM)
 function restoreMessage(m) {
-  if (!m || !Number.isInteger(m.id) || typeof m.content !== 'string') return false;
-  if (!Number.isInteger(m.user_id)) return false;
+  if (!m || !isInt(m.id) || typeof m.content !== 'string') return 'invalid';
+  if (!isInt(m.user_id)) return 'invalid';
+  if (db.prepare('SELECT 1 FROM messages WHERE id = ?').get(m.id)) return 'dup';
 
-  const author = db.prepare('SELECT 1 FROM users WHERE id = ?').get(m.user_id);
-  if (!author) return false;
+  if (!ensureUser(m.user_id, m.username)) return 'no_user';
 
   const isPrivate = m.isPrivate ? 1 : 0;
   let roomId = null;
   let recipientId = null;
 
   if (isPrivate) {
-    if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(m.recipientId)) return false;
+    if (!isInt(m.recipientId) || !ensureUser(m.recipientId, m.recipientUsername)) return 'no_user';
     recipientId = m.recipientId;
   } else {
-    if (!db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(m.roomId)) return false;
+    if (!isInt(m.roomId) || !ensureRoom(m.roomId)) return 'no_room';
     roomId = m.roomId;
   }
-
-  const ts = new Date(m.timestamp);
-  const tsSql = isNaN(ts) ? null : ts.toISOString().replace('T', ' ').slice(0, 19);
 
   const info = db.prepare(`
     INSERT OR IGNORE INTO messages (id, room_id, user_id, content, timestamp, is_private, recipient_id)
     VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)
-  `).run(m.id, roomId, m.user_id, m.content.slice(0, MAX_CONTENT), tsSql, isPrivate, recipientId);
+  `).run(m.id, roomId, m.user_id, m.content.slice(0, MAX_CONTENT), sqlTime(m.timestamp), isPrivate, recipientId);
 
-  return info.changes > 0;
+  return info.changes > 0 ? 'ok' : 'dup';
 }
 
 // ---------------------------------------------------------------
@@ -465,15 +512,15 @@ function handleConnection(ws) {
 
           if (typeof msg.encryptedData !== 'string' || msg.encryptedData.length > 20000) return;
 
-          let restored = false;
+          let result = 'invalid';
           try {
-            restored = restoreBlob(JSON.parse(decryptFromNode(msg.encryptedData)));
+            result = restoreBlob(JSON.parse(decryptFromNode(msg.encryptedData)));
           } catch (e) {
             // blob giả / sai khoá / hỏng -> bỏ qua
             return;
           }
-          send(ws, { type: 'node_sync_ack', restored });
-          if (restored) tryUpgrade();
+          send(ws, { type: 'node_sync_ack', restored: result === 'ok', result });
+          if (result === 'ok') tryUpgrade();
           break;
         }
 

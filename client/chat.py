@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from colorama import Fore, Style
 
@@ -21,6 +22,9 @@ class ChatInterface:
         self.running = True
         self.rooms = []
         self._upload_task = None
+        self._uploaded = False        # đã gửi backup trong kết nối này
+        self._last_upload = 0.0
+        self.ack_counts = {}
         self.node_received = 0
 
     async def start(self):
@@ -45,18 +49,31 @@ class ChatInterface:
             # Gửi bản DB đang có lên server (server bỏ qua bản trùng); chạy nền để không chặn nhận tin
             self._start_upload()
 
-    def _start_upload(self):
+    def _start_upload(self, force=False):
         if self._upload_task and not self._upload_task.done():
             return
+        if self._uploaded and not force:
+            return  # kết nối này đã gửi rồi (tránh gửi lặp khi server vừa bảo vừa nhắc)
         self._upload_task = asyncio.create_task(self._upload_node_data())
 
     async def _upload_node_data(self):
         try:
+            self.ack_counts = {}
             n = await self.node.send_sync(self.ws)
+            self._uploaded = True
+            self._last_upload = time.monotonic()
             if n:
-                print(f"{Fore.GREEN}Node backup: đã gửi {n} bản ghi lên server (bản trùng sẽ bị bỏ qua){Style.RESET_ALL}")
+                await asyncio.sleep(1.5)  # chờ server trả kết quả
+                print(f"{Fore.GREEN}Node backup: đã gửi {n} bản ghi lên server → {self._ack_summary()}{Style.RESET_ALL}")
         except Exception:
             pass  # mất kết nối giữa chừng: lần kết nối sau sẽ gửi lại
+
+    def _ack_summary(self):
+        names = {"ok": "khôi phục mới", "dup": "đã có (bỏ qua)", "invalid": "không hợp lệ",
+                 "no_user": "thiếu user", "no_room": "thiếu phòng"}
+        if not self.ack_counts:
+            return "server chưa phản hồi (có thể ngoài cửa sổ khôi phục hoặc bản ghi bị từ chối)"
+        return ", ".join(f"{names.get(k, k)}: {v}" for k, v in self.ack_counts.items())
 
     async def _announce_node(self):
         """Báo cho server biết client này là node backup (nếu đang bật)."""
@@ -165,6 +182,7 @@ class ChatInterface:
             except Exception:
                 delay = min(delay * 2, 30)
                 continue
+            self._uploaded = False
             if self.node.enabled:
                 await self._send_node_mode(True)
             if self.current_room_id is not None:
@@ -210,9 +228,11 @@ class ChatInterface:
                 print(f"{Fore.GREEN}Node backup: đã nhận dữ liệu từ server (tổng {self.node.count()} bản ghi){Style.RESET_ALL}")
         elif t == "node_restore_request":
             if self.node.enabled:
-                self._start_upload()
+                # Admin yêu cầu / server rỗng: gửi lại nếu lần gửi trước đã cách đây > 30s
+                self._start_upload(force=time.monotonic() - self._last_upload > 30)
         elif t == "node_sync_ack":
-            pass
+            key = msg.get("result") or ("ok" if msg.get("restored") else "dup")
+            self.ack_counts[key] = self.ack_counts.get(key, 0) + 1
         elif t == "error":
             print(f"{Fore.RED}Lỗi: {msg.get('message')}{Style.RESET_ALL}")
         elif t == "warning":

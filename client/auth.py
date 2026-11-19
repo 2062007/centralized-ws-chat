@@ -36,6 +36,9 @@ class AuthManager:
         self.token = None
         self.user_id = None
         self.config = None
+        self.last_status = None      # mã HTTP của lần đăng nhập gần nhất
+        self.creds_ok = False        # đã giải mã được mật khẩu đã lưu
+        self._saved = None           # (username, password) đã lưu
         self.server_url = normalize_url(server_url or os.getenv("CHAT_SERVER_URL", "https://localhost"))
 
     def has_creds(self):
@@ -63,13 +66,44 @@ class AuthManager:
         except (aiohttp.ClientError, OSError) as exc:
             print(f"Không kết nối được server: {exc}")
             return False
+        self.last_status = status
         if status == 200:
             self.username = data["username"]
             self.token = data["token"]
             self.user_id = data["userId"]
+            self._cache_token()
             return True
         print(f"Đăng nhập thất bại: {data.get('error', status)}")
         return False
+
+    def _write_config(self):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(self.config, f)
+        try:
+            os.chmod(CONFIG_FILE, 0o600)
+        except OSError:
+            pass
+
+    def _cache_token(self):
+        """Lưu token gần nhất: khi server bị reset (mất tài khoản) vẫn dùng nó để node gửi backup lên."""
+        if self.config is not None:
+            self.config["token"] = self.token
+            self.config["user_id"] = self.user_id
+            self._write_config()
+
+    def recovery_info(self):
+        """(token, user_id, username) đã lưu, hoặc None nếu chưa có."""
+        c = self.config or {}
+        if c.get("token") and isinstance(c.get("user_id"), int) and c.get("username"):
+            return c["token"], c["user_id"], c["username"]
+        return None
+
+    async def retry_login(self):
+        return bool(self._saved) and await self._api_login(*self._saved)
+
+    async def register_saved(self):
+        """Đăng ký lại bằng thông tin đã lưu (nhận lại tài khoản tạm nếu server khôi phục từ backup)."""
+        return bool(self._saved) and await self.register(*self._saved)
 
     async def load_and_login(self, master_pass):
         try:
@@ -80,6 +114,8 @@ class AuthManager:
         except (ValueError, KeyError, OSError) as exc:
             print(f"Không đọc được thông tin đã lưu: {exc}")
             return False
+        self.creds_ok = True
+        self._saved = (username, password)
         return await self._api_login(username, password)
 
     async def login(self, username, password, master_pass):
@@ -87,12 +123,7 @@ class AuthManager:
             return False
         encrypted = encrypt(password.encode(), master_pass)
         self.config = {"username": username, "encrypted_password": encrypted.hex(), "server_url": self.server_url}
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(self.config, f)
-        try:
-            os.chmod(CONFIG_FILE, 0o600)
-        except OSError:
-            pass
+        self._cache_token()
         return True
 
     async def register(self, username, password):

@@ -272,6 +272,10 @@ Backup gồm **toàn bộ dữ liệu**: `user` (kèm password_hash), `room` và
 
 Khi bảng `users` rỗng, server **vẫn cho node kết nối** (phiên "chỉ khôi phục", token vẫn hợp lệ nhờ JWT_SECRET) và gửi `node_restore_request` ngay lập tức, không chờ admin hay cửa sổ boot. Chỉ các sự kiện node được xử lý. Khi tài khoản của node được khôi phục, phiên tự nâng thành phiên chat bình thường (`welcome`). Mọi khoá tài khoản/phòng/tin nhắn giữ nguyên id gốc.
 
+**Backup cũ chỉ có tin nhắn** (chưa có user/phòng): server dựng tài khoản/phòng *tạm* (`is_placeholder = 1`, không đăng nhập được) để giữ lịch sử. Ai đăng ký lại đúng username sẽ nhận lại tài khoản tạm (tắt bằng `ALLOW_CLAIM_PLACEHOLDER=0`; lưu ý người đăng ký trước sẽ chiếm được username đó). Khi node gửi user/phòng thật, bản tạm được ghi đè.
+
+**Client sau khi server reset:** client lưu token (hiệu lực 7 ngày) trong `config.json`. Nếu đăng nhập báo `Invalid credentials` dù mật khẩu đã lưu đúng, client tự dùng token đó để gửi backup lên trước, rồi đăng nhập lại; nếu vẫn không được sẽ hỏi đăng ký lại bằng thông tin đã lưu. Sau mỗi lần gửi, client in kết quả server trả về (khôi phục mới / đã có / thiếu user / thiếu phòng / không hợp lệ).
+
 ⚠️ Node clients cannot decrypt the blobs without the MASTER_KEY, ensuring that even if a node is compromised, the chat history remains confidential.
 
 ---

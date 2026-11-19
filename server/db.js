@@ -42,6 +42,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_private ON messages(is_private, user_id, recipient_id, id);
 `);
 
+// Tài khoản / phòng "tạm" được dựng lại từ backup tin nhắn cũ (không có dữ liệu user/room gốc)
+for (const t of ['users', 'rooms']) {
+  const cols = db.pragma(`table_info(${t})`).map(c => c.name);
+  if (!cols.includes('is_placeholder')) db.exec(`ALTER TABLE ${t} ADD COLUMN is_placeholder INTEGER DEFAULT 0`);
+}
+
 // SQLite CURRENT_TIMESTAMP là UTC dạng "YYYY-MM-DD HH:MM:SS" (không có múi giờ).
 // new Date() sẽ hiểu nhầm là giờ local -> chuẩn hoá về ISO 8601 UTC.
 function toISO(ts) {
