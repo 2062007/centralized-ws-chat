@@ -12,7 +12,10 @@ const clients = new Map();
 // roomId -> Set<ws>
 const rooms = new Map();
 
-let restoreUntil = 0;
+// ---- Trạng thái khôi phục ----
+let restoreUntil = 0;      // hạn "mềm" — có thể gia hạn khi node mới vào
+let restoreDeadline = 0;   // hạn "cứng" — không bao giờ vượt qua khi auto-restore
+let autoRestoreOnBoot = false;
 
 const sendLimiter = createLimiter(20, 10 * 1000); // 20 tin / 10 giây / user
 
@@ -34,6 +37,12 @@ function broadcastToNodeClients(obj) {
   }
 }
 
+function countNodeClients() {
+  let n = 0;
+  for (const set of clients.values()) for (const ws of set) if (ws.isNode) n++;
+  return n;
+}
+
 function getPublicRooms() {
   return db.prepare('SELECT id, name, is_public FROM rooms WHERE is_public = 1 ORDER BY id DESC').all();
 }
@@ -43,13 +52,43 @@ function broadcastRooms() {
   for (const set of clients.values()) for (const ws of set) send(ws, { type: 'rooms', data });
 }
 
-// Mở "cửa sổ khôi phục": yêu cầu mọi node gửi lại dữ liệu đã lưu
-function startRestore() {
-  restoreUntil = Date.now() + RESTORE_WINDOW_MS;
-  let nodes = 0;
-  for (const set of clients.values()) for (const ws of set) if (ws.isNode) nodes++;
+// ---------------------------------------------------------------
+// Khôi phục dữ liệu từ node client
+// ---------------------------------------------------------------
+
+// Mở "cửa sổ khôi phục". extend=true: gia hạn (dùng khi node mới vào),
+// ngược lại: reset cửa sổ mới (gọi từ admin hoặc lúc boot).
+function startRestore({ extend = false, windowMs = RESTORE_WINDOW_MS } = {}) {
+  const now = Date.now();
+
+  if (extend) {
+    // Chỉ gia hạn nếu vẫn trong cửa sổ auto-restore ban đầu
+    if (!autoRestoreOnBoot || now > restoreDeadline) {
+      return { nodes: countNodeClients(), windowMs: 0, extended: false };
+    }
+    restoreUntil = Math.max(restoreUntil, now + windowMs);
+  } else {
+    autoRestoreOnBoot = false;
+    restoreUntil = now + windowMs;
+    restoreDeadline = restoreUntil;
+  }
+
+  const nodes = countNodeClients();
   broadcastToNodeClients({ type: 'node_restore_request' });
-  return { nodes, windowMs: RESTORE_WINDOW_MS };
+  return { nodes, windowMs: Math.max(0, restoreUntil - now), extended: extend };
+}
+
+// Gọi lúc boot: nếu bảng messages rỗng thì mở cửa sổ auto-restore dài.
+// Node client kết nối sau đó sẽ được yêu cầu gửi dữ liệu.
+function maybeAutoRestore() {
+  const empty = db.prepare('SELECT COUNT(*) AS n FROM messages').get().n === 0;
+  if (!empty) return { started: false, reason: 'db not empty' };
+
+  autoRestoreOnBoot = true;
+  restoreDeadline = Date.now() + RESTORE_WINDOW_MS;
+  startRestore({ windowMs: RESTORE_WINDOW_MS });
+  console.log('🔄 DB rỗng → mở cửa sổ khôi phục, chờ node client gửi dữ liệu...');
+  return { started: true, windowMs: RESTORE_WINDOW_MS };
 }
 
 function leaveRoom(ws, roomId) {
@@ -69,11 +108,14 @@ function disconnectBanned(userId) {
 function restoreMessage(m) {
   if (!m || !Number.isInteger(m.id) || typeof m.content !== 'string') return false;
   if (!Number.isInteger(m.user_id)) return false;
+
   const author = db.prepare('SELECT 1 FROM users WHERE id = ?').get(m.user_id);
   if (!author) return false;
+
   const isPrivate = m.isPrivate ? 1 : 0;
   let roomId = null;
   let recipientId = null;
+
   if (isPrivate) {
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(m.recipientId)) return false;
     recipientId = m.recipientId;
@@ -81,14 +123,21 @@ function restoreMessage(m) {
     if (!db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(m.roomId)) return false;
     roomId = m.roomId;
   }
+
   const ts = new Date(m.timestamp);
   const tsSql = isNaN(ts) ? null : ts.toISOString().replace('T', ' ').slice(0, 19);
+
   const info = db.prepare(`
     INSERT OR IGNORE INTO messages (id, room_id, user_id, content, timestamp, is_private, recipient_id)
     VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)
   `).run(m.id, roomId, m.user_id, m.content.slice(0, MAX_CONTENT), tsSql, isPrivate, recipientId);
+
   return info.changes > 0;
 }
+
+// ---------------------------------------------------------------
+// Kết nối WebSocket
+// ---------------------------------------------------------------
 
 function handleConnection(ws) {
   const { userId, username } = ws.user;
@@ -110,6 +159,12 @@ function handleConnection(ws) {
 
   send(ws, { type: 'welcome', userId, username });
   send(ws, { type: 'rooms', data: getPublicRooms() });
+
+  // Nếu đang trong cửa sổ auto-restore, nhắc node mới gửi dữ liệu ngay
+  if (autoRestoreOnBoot && Date.now() <= restoreDeadline) {
+    // Gửi kèm tín hiệu để client biết cần bật node_mode
+    send(ws, { type: 'node_restore_hint', active: true });
+  }
 
   ws.on('message', async (raw) => {
     let msg;
@@ -190,7 +245,7 @@ function handleConnection(ws) {
             return disconnectBanned(userId);
           }
 
-          // README: chỉ kiểm duyệt tin công khai
+          // Chỉ kiểm duyệt tin công khai
           if (!isPrivate && await moderate(content)) {
             db.prepare('UPDATE users SET ban_count = ban_count + 1 WHERE id = ?').run(userId);
             const { ban_count } = db.prepare('SELECT ban_count FROM users WHERE id = ?').get(userId);
@@ -233,18 +288,31 @@ function handleConnection(ws) {
 
         case 'node_mode': {
           ws.isNode = !!msg.enabled;
+          // Node mới bật giữa cửa sổ auto-restore → gia hạn + yêu cầu gửi dữ liệu
+          if (ws.isNode && autoRestoreOnBoot && Date.now() <= restoreDeadline) {
+            startRestore({ extend: true });
+            send(ws, { type: 'node_restore_request' });
+          }
           break;
         }
 
         case 'node_sync': {
-          // Chỉ nhận khi admin đã mở cửa sổ khôi phục và client đang ở chế độ node
-          if (!ws.isNode || Date.now() > restoreUntil) return;
+          // Chỉ nhận khi client đang ở chế độ node
+          if (!ws.isNode) return;
+
+          // Cho phép nếu còn trong cửa sổ mềm hoặc cửa sổ cứng auto-restore
+          const now = Date.now();
+          const inWindow = now <= restoreUntil || (autoRestoreOnBoot && now <= restoreDeadline);
+          if (!inWindow) return;
+
           if (typeof msg.encryptedData !== 'string' || msg.encryptedData.length > 20000) return;
+
           let restored = false;
           try {
             restored = restoreMessage(JSON.parse(decryptFromNode(msg.encryptedData)));
           } catch (e) {
-            return; // blob giả / sai khoá / hỏng -> bỏ qua
+            // blob giả / sai khoá / hỏng -> bỏ qua
+            return;
           }
           send(ws, { type: 'node_sync_ack', restored });
           break;
@@ -283,4 +351,10 @@ function startHeartbeat(wss) {
   wss.on('close', () => clearInterval(timer));
 }
 
-module.exports = { handleConnection, startHeartbeat, broadcastRooms, startRestore };
+module.exports = {
+  handleConnection,
+  startHeartbeat,
+  broadcastRooms,
+  startRestore,
+  maybeAutoRestore
+};
