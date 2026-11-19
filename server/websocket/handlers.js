@@ -7,6 +7,7 @@ const { createLimiter } = require('../ratelimit');
 
 const MAX_CONTENT = 2000;
 const RESTORE_WINDOW_MS = 10 * 60 * 1000;
+const NODE_BACKUP_INTERVAL_MS = 5 * 60 * 1000; // yêu cầu node gửi backup mỗi 5 phút
 const CATCHUP_BATCH = 500; // số bản ghi tối đa mỗi lượt gửi cho node
 
 // userId -> Set<ws>  (một user có thể mở nhiều tab/thiết bị)
@@ -192,6 +193,19 @@ function maybeAutoRestore() {
   autoRestoreOnBoot = true;
   console.log('🔄 DB rỗng → mở cửa sổ khôi phục, chờ node client gửi dữ liệu...');
   return { started: true, windowMs: RESTORE_WINDOW_MS };
+}
+
+// Định kỳ 5 phút, server chủ động mở cửa sổ upload ngắn và yêu cầu các node
+// đang online gửi lại bản backup đã lưu. Blob vẫn phải qua AES-GCM trước khi restore.
+function startPeriodicNodeBackup() {
+  const timer = setInterval(() => {
+    const nodes = countNodeClients();
+    if (!nodes) return;
+    startRestore({ windowMs: RESTORE_WINDOW_MS });
+    console.log(`📦 Yêu cầu ${nodes} node gửi backup định kỳ (chu kỳ 5 phút)`);
+  }, NODE_BACKUP_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
 }
 
 function leaveRoom(ws, roomId) {
@@ -659,6 +673,7 @@ module.exports = {
   broadcastRooms,
   startRestore,
   maybeAutoRestore,
+  startPeriodicNodeBackup,
   backupUser,
   backupRoom
 };

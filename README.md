@@ -377,3 +377,6 @@ Distributed under the MIT License. See LICENSE for more information.
 
 Built with ❤️ by TGFN team.
 Happy chatting! 🎉
+
+
+Anonymous node backup upload is requested by the server every 5 minutes.
