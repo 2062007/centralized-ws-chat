@@ -3,7 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const db = require('../db');
 const { authMiddleware } = require('../auth');
-const { broadcastRooms } = require('../websocket/handlers');
+const { broadcastRooms, backupRoom } = require('../websocket/handlers');
 
 router.use(authMiddleware);
 
@@ -32,6 +32,7 @@ router.post('/', async (req, res) => {
     'INSERT INTO rooms (name, is_public, password_hash, created_by) VALUES (?, ?, ?, ?)'
   ).run(roomName, isPublic ? 1 : 0, password_hash, req.user.userId);
 
+  backupRoom(Number(info.lastInsertRowid)); // gửi backup phòng mới cho các node
   if (isPublic) broadcastRooms(); // cập nhật danh sách phòng realtime cho mọi người
   res.status(201).json({ id: Number(info.lastInsertRowid), name: roomName, is_public: isPublic });
 });

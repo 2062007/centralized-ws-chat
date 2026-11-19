@@ -243,7 +243,7 @@ rooms { data: [ {id, name, is_public} ] } List of public rooms.
 history { roomId, data: [messages] } Past messages of the room.
 message { data: { id, user_id, username, content, timestamp } } New public message.
 private_message { data: { ... } } New private message.
-node_sync { id, data: encrypted_blob } Bản backup mã hoá cho node (id để node chống trùng).
+node_sync { kind, id, data: encrypted_blob } Bản backup mã hoá cho node (kind = user/room/message; kind+id để node chống trùng).
 node_mode_ack { enabled } Xác nhận trạng thái node.
 node_catchup_done { upTo, more, sent } Kết thúc 1 lượt đồng bộ bù; node lưu upTo làm con trỏ.
 node_restore_request (no payload) Server asks client to send its data.
@@ -262,11 +262,15 @@ error / warning { message } Error or warning from server.
 
 ### Đồng bộ hai chiều khi node kết nối
 
-Mỗi khi client ở chế độ node kết nối (hoặc kết nối lại, hoặc `/node on`):
+Backup gồm **toàn bộ dữ liệu**: `user` (kèm password_hash), `room` và `message`, tất cả mã hoá AES-256-GCM bằng MASTER_KEY (node không đọc được). Mỗi khi client ở chế độ node kết nối (hoặc kết nối lại, hoặc `/node on`):
 
 1. Client gửi `node_mode { enabled: true }`.
-2. **Server → node:** server gửi toàn bộ dữ liệu đã mã hoá bằng MASTER_KEY (`node_sync { id, data }`, 500 bản ghi/lượt, rồi `node_catchup_done { upTo, more }`; node tự xin lượt tiếp bằng `node_catchup`). Node lưu theo `message_id` (UNIQUE) nên bản trùng bị bỏ qua. DB node cũ tự được nâng cấp.
-3. **Node → server:** node tự gửi toàn bộ bản DB đang có lên (`node_sync { encryptedData }`) trong 10 phút sau khi kết nối. Server giải mã + xác thực GCM, bản giả bị loại, bản trùng (đã có id) bị bỏ qua, bản còn thiếu được chèn lại.
+2. **Server → node:** server gửi toàn bộ users, rooms rồi tin nhắn (`node_sync { kind, id, data }`; tin nhắn 500 bản ghi/lượt, node tự xin lượt tiếp bằng `node_catchup`). Node lưu theo khoá `(kind, id)`: tin nhắn trùng thì bỏ qua, user/room trùng thì ghi đè bản mới nhất. Khi có user/phòng mới hoặc bị cấm, server gửi tức thì cho mọi node.
+3. **Node → server:** node tự gửi toàn bộ bản đang có lên (`node_sync { encryptedData }`) theo thứ tự users → rooms → messages trong 10 phút sau khi kết nối. Server giải mã + xác thực GCM, bản giả bị loại, bản trùng bị bỏ qua, bản thiếu được chèn lại.
+
+#### Server mới khởi động / DB bị xoá
+
+Khi bảng `users` rỗng, server **vẫn cho node kết nối** (phiên "chỉ khôi phục", token vẫn hợp lệ nhờ JWT_SECRET) và gửi `node_restore_request` ngay lập tức, không chờ admin hay cửa sổ boot. Chỉ các sự kiện node được xử lý. Khi tài khoản của node được khôi phục, phiên tự nâng thành phiên chat bình thường (`welcome`). Mọi khoá tài khoản/phòng/tin nhắn giữ nguyên id gốc.
 
 ⚠️ Node clients cannot decrypt the blobs without the MASTER_KEY, ensuring that even if a node is compromised, the chat history remains confidential.
 

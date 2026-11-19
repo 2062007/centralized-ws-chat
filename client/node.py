@@ -23,7 +23,11 @@ class NodeManager:
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(node_data)")]
         if "message_id" not in cols:
             self.conn.execute("ALTER TABLE node_data ADD COLUMN message_id INTEGER")
-        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_node_message_id ON node_data(message_id)")
+        # kind: user | room | message — id của mỗi loại nằm ở không gian riêng nên khoá trùng là (kind, id)
+        if "kind" not in cols:
+            self.conn.execute("ALTER TABLE node_data ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'")
+        self.conn.execute("DROP INDEX IF EXISTS idx_node_message_id")
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_node_kind_id ON node_data(kind, message_id)")
         self.conn.commit()
         # Mặc định BẬT: mọi client đều là node backup, trừ khi người dùng /node off
         row = self.conn.execute("SELECT value FROM settings WHERE key = 'node_enabled'").fetchone()
@@ -62,15 +66,19 @@ class NodeManager:
         self._set_setting("sync_cursor", int(value))
         self.conn.commit()
 
-    def store_encrypted(self, encrypted, message_id=None):
-        """Lưu 1 blob. Trả về True nếu là bản ghi mới (trùng message_id thì bỏ qua)."""
+    def store_encrypted(self, encrypted, message_id=None, kind="message"):
+        """Lưu 1 blob. Tin nhắn trùng id thì bỏ qua; user/room trùng id thì ghi đè bản mới nhất.
+        Trả về True nếu có thay đổi."""
         if not (self.enabled and isinstance(encrypted, str)):
             return False
         if not isinstance(message_id, int) or isinstance(message_id, bool):
             message_id = None
+        if kind not in ("user", "room", "message"):
+            kind = "message"
+        verb = "INSERT OR IGNORE" if kind == "message" else "INSERT OR REPLACE"
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO node_data (encrypted_text, message_id) VALUES (?, ?)",
-            (encrypted, message_id),
+            f"{verb} INTO node_data (encrypted_text, message_id, kind) VALUES (?, ?, ?)",
+            (encrypted, message_id, kind),
         )
         self.conn.commit()
         return cur.rowcount > 0
@@ -79,7 +87,7 @@ class NodeManager:
         return self.conn.execute("SELECT COUNT(*) FROM node_data").fetchone()[0]
 
     def get_all_encrypted(self):
-        return [r[0] for r in self.conn.execute("SELECT encrypted_text FROM node_data ORDER BY COALESCE(message_id, id), id")]
+        return [r[0] for r in self.conn.execute("SELECT encrypted_text FROM node_data ORDER BY CASE kind WHEN 'user' THEN 0 WHEN 'room' THEN 1 ELSE 2 END, COALESCE(message_id, id), id")]
 
     async def send_sync(self, ws_client):
         """Gửi lại toàn bộ dữ liệu đã lưu khi server yêu cầu khôi phục."""

@@ -47,6 +47,7 @@ function countNodeClients() {
 // Dựng payload của 1 tin nhắn (cùng định dạng với tin broadcast trực tiếp)
 function nodePayload(m) {
   return {
+    kind: 'message',
     id: m.id,
     user_id: m.user_id,
     username: m.username,
@@ -59,9 +60,46 @@ function nodePayload(m) {
   };
 }
 
-// Gửi 1 bản backup cho node: kèm id ở ngoài để node chống trùng mà không cần giải mã
+// Đóng gói 1 bản backup: kind + id để ngoài để node chống trùng mà không cần giải mã
+function nodeEvent(payload) {
+  return { type: 'node_sync', kind: payload.kind, id: payload.id, data: encryptForNode(JSON.stringify(payload)) };
+}
+
 function sendNodeBlob(ws, payload) {
-  send(ws, { type: 'node_sync', id: payload.id, data: encryptForNode(JSON.stringify(payload)) });
+  send(ws, nodeEvent(payload));
+}
+
+// Backup tài khoản / phòng (gồm cả password_hash — đã mã hoá bằng MASTER_KEY nên node không đọc được)
+function userPayload(u) {
+  return {
+    kind: 'user', id: u.id, username: u.username, password_hash: u.password_hash,
+    is_banned: u.is_banned ? 1 : 0, ban_count: u.ban_count || 0, created_at: u.created_at || null
+  };
+}
+
+function roomPayload(r) {
+  return {
+    kind: 'room', id: r.id, name: r.name, is_public: r.is_public ? 1 : 0,
+    password_hash: r.password_hash || null, created_by: r.created_by || null, created_at: r.created_at || null
+  };
+}
+
+// Gửi tức thì cho mọi node khi có user / phòng mới hoặc đổi trạng thái (đăng ký, tạo phòng, bị cấm)
+function backupUser(userId) {
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  if (u) broadcastToNodeClients(nodeEvent(userPayload(u)));
+}
+
+function backupRoom(roomId) {
+  const r = db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId);
+  if (r) broadcastToNodeClients(nodeEvent(roomPayload(r)));
+}
+
+// Gửi TOÀN BỘ dữ liệu mã hoá xuống node: users, rooms rồi tin nhắn (theo lượt)
+function sendFullSnapshot(ws) {
+  for (const u of db.prepare('SELECT * FROM users ORDER BY id').all()) sendNodeBlob(ws, userPayload(u));
+  for (const r of db.prepare('SELECT * FROM rooms ORDER BY id').all()) sendNodeBlob(ws, roomPayload(r));
+  sendCatchup(ws, 0);
 }
 
 // Đồng bộ bù: gửi các tin có id > afterId mà node còn thiếu (do offline / mới bật node).
@@ -147,6 +185,43 @@ function disconnectBanned(userId) {
   for (const ws of clients.get(userId) || []) ws.close(1008, 'Banned');
 }
 
+const isInt = Number.isInteger;
+const sqlTime = (t) => {
+  const d = new Date(t);
+  return isNaN(d) || t == null ? null : d.toISOString().replace('T', ' ').slice(0, 19);
+};
+
+// Khôi phục tài khoản (bỏ qua nếu đã có id hoặc trùng username)
+function restoreUser(u) {
+  if (!isInt(u.id) || typeof u.username !== 'string' || !u.username) return false;
+  if (typeof u.password_hash !== 'string' || !u.password_hash.startsWith('$2')) return false;
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO users (id, username, password_hash, is_banned, ban_count, created_at)
+    VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+  `).run(u.id, u.username, u.password_hash, u.is_banned ? 1 : 0, isInt(u.ban_count) ? u.ban_count : 0, sqlTime(u.created_at));
+  return info.changes > 0;
+}
+
+// Khôi phục phòng (created_by trỏ tới user không còn thì để NULL)
+function restoreRoom(r) {
+  if (!isInt(r.id) || typeof r.name !== 'string' || !r.name) return false;
+  const isPublic = r.is_public ? 1 : 0;
+  if (!isPublic && typeof r.password_hash !== 'string') return false;
+  const creator = isInt(r.created_by) && db.prepare('SELECT 1 FROM users WHERE id = ?').get(r.created_by) ? r.created_by : null;
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO rooms (id, name, is_public, password_hash, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+  `).run(r.id, r.name.slice(0, 64), isPublic, isPublic ? null : r.password_hash, creator, sqlTime(r.created_at));
+  return info.changes > 0;
+}
+
+function restoreBlob(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (obj.kind === 'user') return restoreUser(obj);
+  if (obj.kind === 'room') return restoreRoom(obj);
+  return restoreMessage(obj); // kind = 'message' hoặc blob cũ chưa có kind
+}
+
 // Khôi phục 1 tin nhắn từ blob của node (đã xác thực bằng GCM)
 function restoreMessage(m) {
   if (!m || !Number.isInteger(m.id) || typeof m.content !== 'string') return false;
@@ -187,10 +262,14 @@ function handleConnection(ws) {
 
   // Token còn hạn nhưng tài khoản có thể đã bị cấm / bị xoá
   const u = db.prepare('SELECT is_banned FROM users WHERE id = ?').get(userId);
-  if (!u || u.is_banned) {
+  // Server vừa bị reset (không còn user nào): vẫn cho vào chế độ "chỉ khôi phục" để node gửi backup lên.
+  // Token hợp lệ vì ký bằng JWT_SECRET; blob giả vẫn bị loại nhờ GCM.
+  const wiped = !u && db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0;
+  if ((!u && !wiped) || (u && u.is_banned)) {
     ws.close(1008, 'Unauthorized');
     return;
   }
+  ws.restoreOnly = !u;
 
   ws.isNode = false;
   ws.isAlive = true;
@@ -200,14 +279,29 @@ function handleConnection(ws) {
   if (!clients.has(userId)) clients.set(userId, new Set());
   clients.get(userId).add(ws);
 
-  send(ws, { type: 'welcome', userId, username });
-  send(ws, { type: 'rooms', data: getPublicRooms() });
-
-  // Nếu đang trong cửa sổ auto-restore, nhắc node mới gửi dữ liệu ngay
-  if (autoRestoreOnBoot && Date.now() <= restoreDeadline) {
-    // Gửi kèm tín hiệu để client biết cần bật node_mode
+  if (ws.restoreOnly) {
+    // Phát hiện server rỗng: yêu cầu node gửi backup NGAY (không chờ admin / cửa sổ boot)
+    console.log(`[WS] Server rỗng — mở phiên khôi phục cho ${username} (ID: ${userId})`);
     send(ws, { type: 'node_restore_hint', active: true });
+    send(ws, { type: 'node_restore_request' });
+  } else {
+    send(ws, { type: 'welcome', userId, username });
+    send(ws, { type: 'rooms', data: getPublicRooms() });
+    if (autoRestoreOnBoot && Date.now() <= restoreDeadline) {
+      send(ws, { type: 'node_restore_hint', active: true });
+    }
   }
+
+  // Khi tài khoản của chính node đã được khôi phục -> nâng phiên thành phiên chat bình thường
+  const tryUpgrade = () => {
+    if (!ws.restoreOnly) return;
+    const row = db.prepare('SELECT is_banned FROM users WHERE id = ?').get(userId);
+    if (!row) return;
+    if (row.is_banned) return ws.close(1008, 'Banned');
+    ws.restoreOnly = false;
+    send(ws, { type: 'welcome', userId, username });
+    send(ws, { type: 'rooms', data: getPublicRooms() });
+  };
 
   ws.on('message', async (raw) => {
     let msg;
@@ -217,6 +311,12 @@ function handleConnection(ws) {
       return send(ws, { type: 'error', message: 'Tin nhắn không hợp lệ' });
     }
     if (!msg || typeof msg !== 'object') return;
+
+    // Phiên chỉ-khôi-phục: chỉ nhận các sự kiện node
+    if (ws.restoreOnly && !['node_mode', 'node_sync', 'node_catchup'].includes(msg.type)) {
+      tryUpgrade();
+      if (ws.restoreOnly) return send(ws, { type: 'error', message: 'Server đang khôi phục dữ liệu, vui lòng thử lại sau' });
+    }
 
     try {
       switch (msg.type) {
@@ -294,9 +394,11 @@ function handleConnection(ws) {
             const { ban_count } = db.prepare('SELECT ban_count FROM users WHERE id = ?').get(userId);
             if (ban_count >= 3) {
               db.prepare('UPDATE users SET is_banned = 1 WHERE id = ?').run(userId);
+              backupUser(userId);
               send(ws, { type: 'error', message: 'Bạn đã bị cấm vì nội dung độc hại' });
               return disconnectBanned(userId);
             }
+            backupUser(userId);
             return send(ws, { type: 'warning', message: `Tin nhắn bị gắn cờ tiêu cực. Số lần: ${ban_count}/3` });
           }
 
@@ -325,7 +427,7 @@ function handleConnection(ws) {
             broadcastToRoom(roomId, { type: 'message', data: messageData });
           }
 
-          broadcastToNodeClients({ type: 'node_sync', id: messageData.id, data: encryptForNode(JSON.stringify(messageData)) });
+          broadcastToNodeClients(nodeEvent({ kind: 'message', ...messageData }));
           break;
         }
 
@@ -334,7 +436,7 @@ function handleConnection(ws) {
           send(ws, { type: 'node_mode_ack', enabled: ws.isNode });
           if (ws.isNode) {
             // Vừa kết nối: server gửi toàn bộ dữ liệu mã hoá xuống node (node bỏ qua bản trùng)...
-            sendCatchup(ws, 0);
+            sendFullSnapshot(ws);
             // ...và cho phép node gửi bản DB đang có lên server trong cửa sổ này (server bỏ qua bản trùng)
             ws.nodeUploadUntil = Date.now() + RESTORE_WINDOW_MS;
             // Node mới bật giữa cửa sổ auto-restore → gia hạn + yêu cầu gửi dữ liệu
@@ -365,12 +467,13 @@ function handleConnection(ws) {
 
           let restored = false;
           try {
-            restored = restoreMessage(JSON.parse(decryptFromNode(msg.encryptedData)));
+            restored = restoreBlob(JSON.parse(decryptFromNode(msg.encryptedData)));
           } catch (e) {
             // blob giả / sai khoá / hỏng -> bỏ qua
             return;
           }
           send(ws, { type: 'node_sync_ack', restored });
+          if (restored) tryUpgrade();
           break;
         }
 
@@ -412,5 +515,7 @@ module.exports = {
   startHeartbeat,
   broadcastRooms,
   startRestore,
-  maybeAutoRestore
+  maybeAutoRestore,
+  backupUser,
+  backupRoom
 };

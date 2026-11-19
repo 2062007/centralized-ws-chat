@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../db');
 const { hashPassword, comparePassword, generateToken } = require('../auth');
 const { expressLimiter } = require('../ratelimit');
+const { backupUser } = require('../websocket/handlers');
 
 // Chống dò mật khẩu / spam đăng ký
 router.use(expressLimiter(20, 15 * 60 * 1000, 'Quá nhiều yêu cầu, thử lại sau'));
@@ -28,6 +29,7 @@ router.post('/register', async (req, res) => {
   try {
     const hashed = await hashPassword(password);
     const info = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(name, hashed);
+    backupUser(Number(info.lastInsertRowid)); // gửi backup user mới cho các node
     res.status(201).json({ id: Number(info.lastInsertRowid), username: name });
   } catch (err) {
     if (String(err.message).includes('UNIQUE')) {

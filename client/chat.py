@@ -199,7 +199,7 @@ class ChatInterface:
             else:
                 print(f"{Fore.MAGENTA}[Riêng] {d.get('username', '?')} (#{d.get('user_id')}): {d['content']}{Style.RESET_ALL}")
         elif t == "node_sync":
-            self.node.store_encrypted(msg.get("data"), msg.get("id"))
+            self.node.store_encrypted(msg.get("data"), msg.get("id"), msg.get("kind", "message"))
         elif t == "node_catchup_done":
             if not self.node.enabled:
                 return
