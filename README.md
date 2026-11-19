@@ -16,7 +16,7 @@ The server uses **SQLite with WAL mode** for high concurrency, and clients can o
 - 🧩 **Decentralized node clients** – selected clients store an encrypted copy of all messages; server can restore data from them.
 - 🤖 **AI moderation** – integrates with **Google Gemini API** to detect toxic messages; auto‑ban after 3 warnings.
 - 💬 **Full chat experience** – public/private rooms, password‑protected rooms, private direct messages.
-- 🌐 **Web UI** – a static web client (HTML/CSS/JS) with the same chat capabilities.
+- 🌐 **Web UI** – giao diện hiện đại, tự đổi sáng/tối theo hệ thống, dùng tốt trên điện thoại: bong bóng chat gom nhóm theo người gửi, hộp thoại tạo/vào phòng, danh sách tin nhắn riêng có huy hiệu chưa đọc (bấm vào tên người khác để nhắn riêng), Enter gửi / Shift+Enter xuống dòng.
 - 📦 **Pure‑Python client** – uses `aiohttp`, `colorama`, and `pyaes` – no C dependencies.
 - 🔄 **Node sync** – node clients store encrypted blobs and send them back when the server requests a restore.
 - 🛡️ **WAL mode** – enables high concurrency and better performance.
@@ -32,12 +32,14 @@ project/
 │   ├── index.js                 # main entry point (HTTPS + WebSocket)
 │   ├── db.js                    # SQLite setup with WAL mode
 │   ├── auth.js                  # JWT & bcrypt helpers
+│   ├── ratelimit.js             # giới hạn tốc độ
 │   ├── gemini.js                # Gemini moderation integration
 │   ├── node.js                  # node encryption/decryption (MASTER_KEY)
 │   ├── package.json
 │   ├── .env.example
 │   ├── routes/
 │   │   ├── auth.js              # /api/auth/register & /login
+│   │   ├── admin.js             # /api/admin/restore
 │   │   ├── rooms.js             # /api/rooms (list, create, join)
 │   │   └── messages.js          # /api/messages (history, private)
 │   ├── websocket/
@@ -51,6 +53,8 @@ project/
 │       ├── server.key
 │       └── server.crt
 ├── client/
+│   ├── requirements.txt
+│   ├── console.py               # input/getpass không chặn event loop
 │   ├── client.py                # main Python entry point
 │   ├── auth.py                  # login/register & credential storage (pyaes)
 │   ├── crypto.py                # AES‑CTR encryption helpers
@@ -103,10 +107,11 @@ Edit .env and set your own secrets:
 JWT_SECRET=your_jwt_secret_here
 MASTER_KEY=your_32_byte_master_key_for_node_encryption
 GEMINI_API_KEY=your_gemini_api_key
-PORT=443
+ADMIN_TOKEN=optional_token_for_restore_endpoint
+PORT=3000
 ```
 
-MASTER_KEY must be exactly 32 bytes (e.g., 01234567890123456789012345678901).
+JWT_SECRET và MASTER_KEY là **bắt buộc** (>= 16 ký tự, nên dùng chuỗi ngẫu nhiên dài); server sẽ từ chối khởi động nếu thiếu. MASTER_KEY được băm SHA-256 thành khoá AES-256 nên độ dài tuỳ ý.
 If you don't have a Gemini API key, you can leave it empty – moderation will be disabled.
 
 Generate a self‑signed SSL certificate (for local development):
@@ -122,13 +127,13 @@ Start the server:
 npm start
 ```
 
-The server will listen on https://localhost:443 (or the port you set).
+Server mặc định lắng nghe ở cổng 3000 (đổi bằng PORT). Có `certs/` thì chạy HTTPS, không thì HTTP.
 
 3. Client setup
 
 ```bash
 cd client
-pip install aiohttp colorama pyaes
+pip install -r requirements.txt
 ```
 
 Run the client:
@@ -150,7 +155,10 @@ Variable Description
 JWT_SECRET Secret key used to sign JWTs.
 MASTER_KEY 32‑byte key for encrypting node‑sync data (AES‑256‑GCM).
 GEMINI_API_KEY Google Gemini API key (optional; moderation will be skipped if missing).
-PORT Port on which the HTTPS server listens (default 443).
+PORT Cổng lắng nghe (mặc định 3000).
+GEMINI_MODEL Model Gemini dùng kiểm duyệt (mặc định gemini-2.0-flash).
+ADMIN_TOKEN Token cho POST /api/admin/restore (bỏ trống = tắt).
+DB_PATH Đường dẫn file SQLite (mặc định server/chat.db).
 
 Client configuration
 
@@ -173,7 +181,7 @@ Once the server is running, it provides:
 
 Web Client
 
-Open your browser at https://localhost (accept the self‑signed certificate warning).
+Mở trình duyệt tại http://localhost:3000 (hoặc https nếu có certs) (accept the self‑signed certificate warning).
 Use the web UI to:
 
 · Register / login
@@ -205,7 +213,8 @@ POST /api/auth/login Login, returns JWT.
 GET /api/rooms List all public rooms.
 POST /api/rooms Create a room (public or private).
 POST /api/rooms/join/:roomId Verify password for private room.
-GET /api/messages/room/:roomId Get recent messages of a room.
+POST /api/admin/restore Mở cửa sổ khôi phục node (Bearer ADMIN_TOKEN).
+GET /api/messages/room/:roomId Tin nhắn phòng (phòng riêng: header X-Room-Password).
 GET /api/messages/private/:userId Get private messages between users.
 
 All endpoints (except auth) require the Authorization: Bearer <JWT> header.
@@ -244,9 +253,9 @@ error / warning { message } Error or warning from server.
 1. The server holds a MASTER_KEY (32‑byte AES key).
 2. When a message is broadcast, the server encrypts it using MASTER_KEY and sends it as a node_sync event to all clients that have node mode enabled.
 3. Node clients store these encrypted blobs locally (in SQLite).
-4. If the server ever needs to restore lost data, it sends a node_restore_request to all nodes.
-5. Each node responds with its stored encrypted blobs via node_sync.
-6. The server decrypts the blobs with MASTER_KEY and inserts them back into the main database.
+4. Khi cần khôi phục, admin gọi `POST /api/admin/restore` (Bearer ADMIN_TOKEN); server gửi node_restore_request tới các node.
+5. Mỗi node gửi lại các blob qua node_sync (server chỉ nhận trong 10 phút sau yêu cầu).
+6. Server giải mã bằng MASTER_KEY (AES-GCM xác thực toàn vẹn nên blob giả bị loại) và chèn lại tin nhắn còn thiếu (INSERT OR IGNORE theo id).
 
 ⚠️ Node clients cannot decrypt the blobs without the MASTER_KEY, ensuring that even if a node is compromised, the chat history remains confidential.
 
@@ -254,7 +263,7 @@ error / warning { message } Error or warning from server.
 
 🤖 AI Moderation (Gemini)
 
-· The server calls the Gemini API for every public message.
+· Server gọi Gemini cho mỗi tin nhắn công khai (tin riêng không bị kiểm duyệt).
 · If the API returns "negative", the user's ban_count increases.
 · After 3 negative flags, the user is automatically banned.
 · Moderation is non‑blocking – the API call is made asynchronously; messages are still delivered (unless flagged, in which case they are dropped).
@@ -275,14 +284,14 @@ error / warning { message } Error or warning from server.
 
 Server won’t start
 
-· Ensure ports 443 (or your PORT) are not in use.
-· Check that certs/server.key and certs/server.crt exist.
+· Cổng PORT chưa bị chiếm.
+· JWT_SECRET và MASTER_KEY phải được đặt trong .env.
 · Verify that .env contains all required variables.
 
 Client connection fails
 
 · Confirm the server URL is correct.
-· If using self‑signed certificates, the client uses ssl=False – if you use real SSL, change it to True.
+· Với localhost client tự bỏ qua kiểm tra chứng chỉ; với server khác có chứng chỉ tự ký, đặt CHAT_INSECURE_SSL=1.
 · Check that the server is reachable and the WebSocket endpoint is /ws.
 
 Gemini moderation not working
@@ -301,7 +310,7 @@ Deploy Server to Render.com
 4. Add environment variables as in .env.example.
 5. Render will automatically use HTTPS and provide a public URL (e.g., https://your-app.onrender.com).
 
-Note: Since Render provides SSL, you don't need the certs folder – remove the SSL options from index.js or use http with Render's built‑in TLS.
+Render cung cấp TLS sẵn: không cần thư mục certs, server tự chạy HTTP phía sau proxy.
 
 Deploy Client (Standalone)
 

@@ -1,0 +1,8 @@
+node_modules/
+.env
+server/chat.db*
+server/certs/
+client/config.json
+client/server_config.json
+client/node_*.db
+__pycache__/

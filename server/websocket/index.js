@@ -1,2 +1,1 @@
-const { handleConnection } = require('./handlers');
-module.exports = { handleConnection };
+module.exports = require('./handlers');

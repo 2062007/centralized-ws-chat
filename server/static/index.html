@@ -2,42 +2,163 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#161934">
   <title>Chat</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- Không dùng thẻ form để tránh submit -->
-  <div id="login">
-    <h1>Đăng nhập</h1>
-    <input id="username" placeholder="Tên đăng nhập" autofocus>
-    <input id="password" type="password" placeholder="Mật khẩu">
-    <button id="loginBtn" type="button">Đăng nhập</button>
-    <p><a href="#" id="registerLink">Đăng ký</a></p>
+  <div id="toasts" aria-live="polite"></div>
+
+  <!-- Đăng nhập / đăng ký -->
+  <main id="auth" class="auth">
+    <form id="authForm" class="auth-card" autocomplete="on">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" width="34" height="34" aria-hidden="true"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M9 11.5A2.5 2.5 0 0 1 11.5 9h9a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-2.5 2.5H15l-4 3.5V19h-.5A1.5 1.5 0 0 1 9 17.5z" fill="#fff"/></svg>
+        <span>Chat</span>
+      </div>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tabLogin" aria-selected="true">Đăng nhập</button>
+        <button type="button" role="tab" id="tabRegister" aria-selected="false">Tạo tài khoản</button>
+      </div>
+      <label class="field">
+        <span>Tên đăng nhập</span>
+        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+      </label>
+      <label class="field">
+        <span>Mật khẩu</span>
+        <div class="pw">
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <button type="button" id="togglePw" class="ghost small" aria-label="Hiện mật khẩu">Hiện</button>
+        </div>
+        <small id="pwHint" class="hint" hidden>Tối thiểu 8 ký tự. Tên đăng nhập 3–32 ký tự, gồm chữ, số, _ . -</small>
+      </label>
+      <p id="authError" class="form-error" role="alert" hidden></p>
+      <button id="authSubmit" class="primary" type="submit">Đăng nhập</button>
+    </form>
+  </main>
+
+  <!-- Ứng dụng chat -->
+  <div id="app" class="app" hidden>
+    <div id="backdrop" class="backdrop"></div>
+
+    <aside id="sidebar" class="sidebar" aria-label="Phòng và tin nhắn riêng">
+      <div class="side-head">
+        <div class="brand light">
+          <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M9 11.5A2.5 2.5 0 0 1 11.5 9h9a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-2.5 2.5H15l-4 3.5V19h-.5A1.5 1.5 0 0 1 9 17.5z" fill="#fff"/></svg>
+          <span>Chat</span>
+        </div>
+      </div>
+
+      <div class="side-scroll">
+        <section>
+          <h2>Phòng</h2>
+          <ul id="roomList" class="list"></ul>
+          <p id="roomEmpty" class="side-empty" hidden>Chưa có phòng công khai nào.</p>
+          <div class="side-actions">
+            <button id="openCreate" class="side-btn solid" type="button">Tạo phòng</button>
+            <button id="openJoin" class="side-btn" type="button">Vào bằng ID</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Tin nhắn riêng</h2>
+          <ul id="dmList" class="list"></ul>
+          <p id="dmEmpty" class="side-empty">Bấm vào tên một người trong phòng để nhắn riêng.</p>
+          <div class="side-actions">
+            <button id="openDm" class="side-btn" type="button">Nhắn theo ID</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="me">
+        <span id="meAvatar" class="avatar"></span>
+        <div class="me-text">
+          <strong id="meName"></strong>
+          <button id="copyId" class="idchip" type="button" title="Sao chép ID để người khác nhắn riêng cho bạn">ID <span id="meId"></span></button>
+        </div>
+        <span id="conn" class="conn" data-state="off" title="Đang kết nối"></span>
+        <button id="logoutBtn" class="icon-btn light" type="button" aria-label="Đăng xuất" title="Đăng xuất">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <section class="main" id="main" data-mode="room">
+      <header class="topbar">
+        <button id="menuBtn" class="icon-btn menu" type="button" aria-label="Mở danh sách phòng">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="title-wrap">
+          <h1 id="viewTitle">Chọn một cuộc trò chuyện</h1>
+          <p id="viewSub"></p>
+        </div>
+        <button id="copyRoom" class="icon-btn" type="button" aria-label="Sao chép ID phòng" title="Sao chép ID phòng" hidden>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+        </button>
+      </header>
+
+      <div class="thread-wrap">
+        <div id="thread" class="thread" tabindex="0" aria-label="Tin nhắn"></div>
+        <div id="empty" class="empty">
+          <svg viewBox="0 0 48 48" width="56" height="56" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12a4 4 0 0 1 4-4h24a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H22l-9 8v-8h-1a4 4 0 0 1-4-4z"/></svg>
+          <p id="emptyText">Chọn một phòng ở bên trái, hoặc tạo phòng mới để bắt đầu.</p>
+          <button id="emptyOpen" class="primary menu" type="button">Mở danh sách phòng</button>
+        </div>
+        <button id="jump" class="jump" type="button" hidden>Tin nhắn mới</button>
+      </div>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <textarea id="input" rows="1" maxlength="2000" placeholder="Chọn một phòng để bắt đầu" disabled aria-label="Nội dung tin nhắn"></textarea>
+        <button id="sendBtn" class="send" type="submit" disabled aria-label="Gửi">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>
+        </button>
+      </form>
+    </section>
   </div>
 
-  <div id="chat" style="display:none;">
-    <div id="rooms">
-      <h3>Phòng</h3>
-      <ul id="roomList"></ul>
-      <input id="newRoomName" placeholder="Tên phòng mới">
-      <button id="createRoom" type="button">Tạo phòng</button>
-      <div>
-        <input id="joinRoomId" placeholder="ID phòng">
-        <input id="joinRoomPass" placeholder="Mật khẩu (nếu có)">
-        <button id="joinRoom" type="button">Tham gia</button>
+  <!-- Hộp thoại -->
+  <dialog id="dlgCreate">
+    <form method="dialog" id="formCreate" class="dlg">
+      <h2>Tạo phòng</h2>
+      <label class="field"><span>Tên phòng</span><input id="createName" maxlength="64" required></label>
+      <div class="seg" role="radiogroup" aria-label="Loại phòng">
+        <label><input type="radio" name="vis" value="public" checked><span>Công khai</span></label>
+        <label><input type="radio" name="vis" value="private"><span>Riêng tư</span></label>
       </div>
-    </div>
-    <div id="messages">
-      <div id="messageArea"></div>
-      <input id="messageInput" placeholder="Nhập tin nhắn...">
-      <button id="sendBtn" type="button">Gửi</button>
-      <div>
-        <input id="privateUser" placeholder="ID người nhận">
-        <button id="sendPrivate" type="button">Gửi riêng</button>
+      <p class="hint" id="visHint">Ai cũng thấy phòng trong danh sách và vào được.</p>
+      <label class="field" id="createPwWrap" hidden><span>Mật khẩu phòng</span><input id="createPw" type="password" autocomplete="new-password"></label>
+      <p class="form-error" id="createError" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="ghost" data-close>Huỷ</button>
+        <button type="submit" class="primary">Tạo phòng</button>
       </div>
-    </div>
-  </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgJoin">
+    <form method="dialog" id="formJoin" class="dlg">
+      <h2>Vào phòng bằng ID</h2>
+      <label class="field"><span>ID phòng</span><input id="joinId" inputmode="numeric" pattern="[0-9]+" required></label>
+      <label class="field"><span>Mật khẩu</span><input id="joinPw" type="password" autocomplete="off"><small class="hint">Chỉ cần với phòng riêng tư.</small></label>
+      <div class="dlg-actions">
+        <button type="button" class="ghost" data-close>Huỷ</button>
+        <button type="submit" class="primary">Vào phòng</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgDm">
+    <form method="dialog" id="formDm" class="dlg">
+      <h2>Nhắn riêng theo ID</h2>
+      <label class="field"><span>ID người nhận</span><input id="dmId" inputmode="numeric" pattern="[0-9]+" required><small class="hint">Nhờ người đó bấm vào “ID” ở góc dưới bên trái để sao chép và gửi cho bạn.</small></label>
+      <div class="dlg-actions">
+        <button type="button" class="ghost" data-close>Huỷ</button>
+        <button type="submit" class="primary">Mở cuộc trò chuyện</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/chat.js"></script>
 </body>
