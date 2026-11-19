@@ -231,7 +231,8 @@ Event Payload Description
 join_room { roomId, password? } Join a room.
 leave_room { roomId } Leave a room.
 send_message { roomId, content, isPrivate?, recipientId? } Send a message.
-node_mode { enabled } Enable/disable node mode.
+node_mode { enabled, lastId? } Bật/tắt node mode; kèm lastId (con trỏ backup) để server tự gửi bù tin còn thiếu.
+node_catchup { afterId } Xin lượt đồng bộ bù tiếp theo (khi more = true).
 node_sync { encryptedData } Send stored encrypted data to server.
 node_restore_request (no payload) Server requests node data.
 
@@ -242,7 +243,9 @@ rooms { data: [ {id, name, is_public} ] } List of public rooms.
 history { roomId, data: [messages] } Past messages of the room.
 message { data: { id, user_id, username, content, timestamp } } New public message.
 private_message { data: { ... } } New private message.
-node_sync { data: encrypted_blob } Encrypted message for node clients.
+node_sync { id, data: encrypted_blob } Bản backup mã hoá cho node (id để node chống trùng).
+node_mode_ack { enabled } Xác nhận trạng thái node.
+node_catchup_done { upTo, more, sent } Kết thúc 1 lượt đồng bộ bù; node lưu upTo làm con trỏ.
 node_restore_request (no payload) Server asks client to send its data.
 error / warning { message } Error or warning from server.
 
@@ -256,6 +259,14 @@ error / warning { message } Error or warning from server.
 4. Khi cần khôi phục, admin gọi `POST /api/admin/restore` (Bearer ADMIN_TOKEN); server gửi node_restore_request tới các node.
 5. Mỗi node gửi lại các blob qua node_sync (server chỉ nhận trong 10 phút sau yêu cầu).
 6. Server giải mã bằng MASTER_KEY (AES-GCM xác thực toàn vẹn nên blob giả bị loại) và chèn lại tin nhắn còn thiếu (INSERT OR IGNORE theo id).
+
+### Đồng bộ hai chiều khi node kết nối
+
+Mỗi khi client ở chế độ node kết nối (hoặc kết nối lại, hoặc `/node on`):
+
+1. Client gửi `node_mode { enabled: true }`.
+2. **Server → node:** server gửi toàn bộ dữ liệu đã mã hoá bằng MASTER_KEY (`node_sync { id, data }`, 500 bản ghi/lượt, rồi `node_catchup_done { upTo, more }`; node tự xin lượt tiếp bằng `node_catchup`). Node lưu theo `message_id` (UNIQUE) nên bản trùng bị bỏ qua. DB node cũ tự được nâng cấp.
+3. **Node → server:** node tự gửi toàn bộ bản DB đang có lên (`node_sync { encryptedData }`) trong 10 phút sau khi kết nối. Server giải mã + xác thực GCM, bản giả bị loại, bản trùng (đã có id) bị bỏ qua, bản còn thiếu được chèn lại.
 
 ⚠️ Node clients cannot decrypt the blobs without the MASTER_KEY, ensuring that even if a node is compromised, the chat history remains confidential.
 

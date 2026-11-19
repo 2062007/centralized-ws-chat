@@ -20,6 +20,8 @@ class ChatInterface:
         self.user_id = ws_client.user_id
         self.running = True
         self.rooms = []
+        self._upload_task = None
+        self.node_received = 0
 
     async def start(self):
         await self.ws.connect()
@@ -36,10 +38,30 @@ class ChatInterface:
             await self.ws.close()
             self.node.close()
 
+    async def _send_node_mode(self, enabled):
+        """Báo trạng thái node + con trỏ backup; server sẽ tự gửi bù phần còn thiếu."""
+        await self.ws.send({"type": "node_mode", "enabled": enabled})
+        if enabled:
+            # Gửi bản DB đang có lên server (server bỏ qua bản trùng); chạy nền để không chặn nhận tin
+            self._start_upload()
+
+    def _start_upload(self):
+        if self._upload_task and not self._upload_task.done():
+            return
+        self._upload_task = asyncio.create_task(self._upload_node_data())
+
+    async def _upload_node_data(self):
+        try:
+            n = await self.node.send_sync(self.ws)
+            if n:
+                print(f"{Fore.GREEN}Node backup: đã gửi {n} bản ghi lên server (bản trùng sẽ bị bỏ qua){Style.RESET_ALL}")
+        except Exception:
+            pass  # mất kết nối giữa chừng: lần kết nối sau sẽ gửi lại
+
     async def _announce_node(self):
         """Báo cho server biết client này là node backup (nếu đang bật)."""
         if self.node.enabled:
-            await self.ws.send({"type": "node_mode", "enabled": True})
+            await self._send_node_mode(True)
             print(f"{Fore.GREEN}Node backup: BẬT{Style.RESET_ALL} (đang lưu {self.node.count()} bản ghi, tắt bằng /node off)")
         else:
             print("Node backup: TẮT (bật bằng /node on)")
@@ -105,7 +127,7 @@ class ChatInterface:
                 return print("Cú pháp: /node on|off|status")
             enabled = parts[1].lower() == "on"
             self.node.set_enabled(enabled)
-            await self.ws.send({"type": "node_mode", "enabled": enabled})
+            await self._send_node_mode(enabled)
             print(f"Node backup {'bật' if enabled else 'tắt'} (đã lưu lại cho lần chạy sau)")
         elif name == "/msg":
             if len(parts) < 3 or not parts[1].isdigit():
@@ -144,7 +166,7 @@ class ChatInterface:
                 delay = min(delay * 2, 30)
                 continue
             if self.node.enabled:
-                await self.ws.send({"type": "node_mode", "enabled": True})
+                await self._send_node_mode(True)
             if self.current_room_id is not None:
                 await self.ws.send({"type": "join_room", "roomId": self.current_room_id, "password": self.current_room_password})
             print(f"{Fore.GREEN}Đã kết nối lại{Style.RESET_ALL}")
@@ -177,11 +199,18 @@ class ChatInterface:
             else:
                 print(f"{Fore.MAGENTA}[Riêng] {d.get('username', '?')} (#{d.get('user_id')}): {d['content']}{Style.RESET_ALL}")
         elif t == "node_sync":
-            self.node.store_encrypted(msg.get("data"))
+            self.node.store_encrypted(msg.get("data"), msg.get("id"))
+        elif t == "node_catchup_done":
+            if not self.node.enabled:
+                return
+            self.node_received += msg.get("sent", 0)
+            if msg.get("more"):
+                await self.ws.send({"type": "node_catchup", "afterId": msg.get("upTo", 0)})
+            else:
+                print(f"{Fore.GREEN}Node backup: đã nhận dữ liệu từ server (tổng {self.node.count()} bản ghi){Style.RESET_ALL}")
         elif t == "node_restore_request":
             if self.node.enabled:
-                n = await self.node.send_sync(self.ws)
-                print(f"Đã gửi {n} bản ghi node cho server")
+                self._start_upload()
         elif t == "node_sync_ack":
             pass
         elif t == "error":

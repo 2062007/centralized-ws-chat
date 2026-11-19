@@ -6,6 +6,7 @@ const { createLimiter } = require('../ratelimit');
 
 const MAX_CONTENT = 2000;
 const RESTORE_WINDOW_MS = 10 * 60 * 1000;
+const CATCHUP_BATCH = 500; // số bản ghi tối đa mỗi lượt gửi cho node
 
 // userId -> Set<ws>  (một user có thể mở nhiều tab/thiết bị)
 const clients = new Map();
@@ -41,6 +42,48 @@ function countNodeClients() {
   let n = 0;
   for (const set of clients.values()) for (const ws of set) if (ws.isNode) n++;
   return n;
+}
+
+// Dựng payload của 1 tin nhắn (cùng định dạng với tin broadcast trực tiếp)
+function nodePayload(m) {
+  return {
+    id: m.id,
+    user_id: m.user_id,
+    username: m.username,
+    content: m.content,
+    timestamp: db.toISO(m.timestamp),
+    isPrivate: !!m.is_private,
+    roomId: m.is_private ? null : m.room_id,
+    recipientId: m.is_private ? m.recipient_id : null,
+    recipientUsername: m.recipient_username || null
+  };
+}
+
+// Gửi 1 bản backup cho node: kèm id ở ngoài để node chống trùng mà không cần giải mã
+function sendNodeBlob(ws, payload) {
+  send(ws, { type: 'node_sync', id: payload.id, data: encryptForNode(JSON.stringify(payload)) });
+}
+
+// Đồng bộ bù: gửi các tin có id > afterId mà node còn thiếu (do offline / mới bật node).
+// Mỗi lượt tối đa CATCHUP_BATCH; node xin lượt tiếp khi more = true.
+function sendCatchup(ws, afterId) {
+  const rows = db.prepare(`
+    SELECT m.id, m.room_id, m.user_id, m.content, m.timestamp, m.is_private, m.recipient_id,
+           u.username, r.username AS recipient_username
+    FROM messages m
+    JOIN users u ON u.id = m.user_id
+    LEFT JOIN users r ON r.id = m.recipient_id
+    WHERE m.id > ?
+    ORDER BY m.id
+    LIMIT ?
+  `).all(afterId, CATCHUP_BATCH + 1);
+  const more = rows.length > CATCHUP_BATCH;
+  if (more) rows.pop();
+  for (const m of rows) sendNodeBlob(ws, nodePayload(m));
+  // Hết dữ liệu: upTo = id lớn nhất hiện có (cũng tự sửa con trỏ nếu DB server từng bị reset)
+  const upTo = more ? rows[rows.length - 1].id
+    : (db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM messages').get().m);
+  send(ws, { type: 'node_catchup_done', upTo, more, sent: rows.length });
 }
 
 function getPublicRooms() {
@@ -84,9 +127,9 @@ function maybeAutoRestore() {
   const empty = db.prepare('SELECT COUNT(*) AS n FROM messages').get().n === 0;
   if (!empty) return { started: false, reason: 'db not empty' };
 
-  autoRestoreOnBoot = true;
-  restoreDeadline = Date.now() + RESTORE_WINDOW_MS;
+  // startRestore() (không extend) reset autoRestoreOnBoot về false, nên phải bật cờ SAU khi gọi
   startRestore({ windowMs: RESTORE_WINDOW_MS });
+  autoRestoreOnBoot = true;
   console.log('🔄 DB rỗng → mở cửa sổ khôi phục, chờ node client gửi dữ liệu...');
   return { started: true, windowMs: RESTORE_WINDOW_MS };
 }
@@ -282,17 +325,29 @@ function handleConnection(ws) {
             broadcastToRoom(roomId, { type: 'message', data: messageData });
           }
 
-          broadcastToNodeClients({ type: 'node_sync', data: encryptForNode(JSON.stringify(messageData)) });
+          broadcastToNodeClients({ type: 'node_sync', id: messageData.id, data: encryptForNode(JSON.stringify(messageData)) });
           break;
         }
 
         case 'node_mode': {
           ws.isNode = !!msg.enabled;
-          // Node mới bật giữa cửa sổ auto-restore → gia hạn + yêu cầu gửi dữ liệu
-          if (ws.isNode && autoRestoreOnBoot && Date.now() <= restoreDeadline) {
-            startRestore({ extend: true });
-            send(ws, { type: 'node_restore_request' });
+          send(ws, { type: 'node_mode_ack', enabled: ws.isNode });
+          if (ws.isNode) {
+            // Vừa kết nối: server gửi toàn bộ dữ liệu mã hoá xuống node (node bỏ qua bản trùng)...
+            sendCatchup(ws, 0);
+            // ...và cho phép node gửi bản DB đang có lên server trong cửa sổ này (server bỏ qua bản trùng)
+            ws.nodeUploadUntil = Date.now() + RESTORE_WINDOW_MS;
+            // Node mới bật giữa cửa sổ auto-restore → gia hạn + yêu cầu gửi dữ liệu
+            if (autoRestoreOnBoot && Date.now() <= restoreDeadline) {
+              startRestore({ extend: true }); // đã broadcast node_restore_request tới mọi node (gồm node này)
+            }
           }
+          break;
+        }
+
+        case 'node_catchup': {
+          if (!ws.isNode || !Number.isInteger(msg.afterId) || msg.afterId < 0) return;
+          sendCatchup(ws, msg.afterId);
           break;
         }
 
@@ -302,7 +357,8 @@ function handleConnection(ws) {
 
           // Cho phép nếu còn trong cửa sổ mềm hoặc cửa sổ cứng auto-restore
           const now = Date.now();
-          const inWindow = now <= restoreUntil || (autoRestoreOnBoot && now <= restoreDeadline);
+          const inWindow = now <= Math.max(restoreUntil, ws.nodeUploadUntil || 0) ||
+            (autoRestoreOnBoot && now <= restoreDeadline);
           if (!inWindow) return;
 
           if (typeof msg.encryptedData !== 'string' || msg.encryptedData.length > 20000) return;

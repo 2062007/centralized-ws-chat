@@ -13,7 +13,7 @@ const authRoutes = require('./routes/auth');
 const roomRoutes = require('./routes/rooms');
 const msgRoutes = require('./routes/messages');
 const adminRoutes = require('./routes/admin');
-const { handleConnection, startHeartbeat } = require('./websocket/handlers');
+const { handleConnection, startHeartbeat, maybeAutoRestore } = require('./websocket/handlers');
 
 const app = express();
 app.disable('x-powered-by');
@@ -93,6 +93,8 @@ wss.on('connection', (ws, req) => {
 
 wss.on('error', (err) => console.error('[WS] Server error:', err));
 startHeartbeat(wss);
+// DB rỗng (vd. server vừa bị reset) → tự mở cửa sổ khôi phục từ node client
+maybeAutoRestore();
 
 server.listen(PORT, () => {
   console.log(`✅ ${hasCert ? 'HTTPS' : 'HTTP'} server running on port ${PORT}`);
@@ -106,3 +108,4 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
