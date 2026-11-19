@@ -148,7 +148,7 @@ python client.py
 python client.py --sync-only
 ```
 
-Chế độ này kết nối WebSocket không token, chỉ nhận snapshot DB đã mã hoá AES-256-GCM và gửi lại các blob backup hợp lệ khi server mở cửa sổ khôi phục. Kết nối này không thể vào phòng, đọc tin nhắn dạng rõ, gửi chat hoặc gọi API tài khoản. File backup được lưu tại `node_anonymous.db`. Client không tự upload khi vừa kết nối; chỉ gửi dữ liệu sau `node_restore_request` từ server. Server giới hạn số lần kết nối/IP, số kết nối ẩn danh đồng thời, tốc độ frame/kết nối, kích thước blob và số blob mỗi kết nối.
+Chế độ này kết nối WebSocket không token, nhận snapshot DB đã mã hoá AES-256-GCM từ server và lưu cục bộ. Kết nối này không thể vào phòng, đọc tin nhắn dạng rõ, gửi chat hoặc gọi API tài khoản. File backup được lưu tại `node_anonymous.db`. Server gửi snapshot ngay khi node kết nối và gửi lại toàn bộ snapshot định kỳ mỗi 5 phút. Client chỉ upload ngược lên server khi server mở cửa sổ khôi phục bằng `node_restore_request`. Server giới hạn số lần kết nối/IP, số kết nối ẩn danh đồng thời, tốc độ frame/kết nối, kích thước blob và số blob mỗi kết nối.
 
 Dùng `MASTER_KEY` ngẫu nhiên tối thiểu 32 byte và giữ nguyên bí mật. AES-256-GCM xác thực ciphertext trước khi restore; mã hoá không ngăn DoS hoặc việc xoá DB, vì vậy vẫn cần persistent disk và backup vận hành độc lập.
 
@@ -273,11 +273,15 @@ error / warning { message } Error or warning from server.
 
 ### Đồng bộ hai chiều khi node kết nối
 
-Backup gồm **toàn bộ dữ liệu**: `user` (kèm password_hash), `room` và `message`, tất cả mã hoá AES-256-GCM bằng MASTER_KEY (node không đọc được). Mỗi khi client ở chế độ node kết nối (hoặc kết nối lại, hoặc `/node on`):
+Backup gồm **toàn bộ dữ liệu**: `user` (kèm password_hash), `room` và `message`, tất cả mã hoá AES-256-GCM bằng MASTER_KEY (node không đọc được). Mỗi khi client ở chế độ node kết nối (hoặc kết nối lại, hoặc `/node on`), server gửi snapshot; sau đó server tiếp tục gửi lại toàn bộ snapshot mỗi 5 phút:
 
 1. Client gửi `node_mode { enabled: true }`.
 2. **Server → node:** server gửi toàn bộ users, rooms rồi tin nhắn (`node_sync { kind, id, data }`; tin nhắn 500 bản ghi/lượt, node tự xin lượt tiếp bằng `node_catchup`). Node lưu theo khoá `(kind, id)`: tin nhắn trùng thì bỏ qua, user/room trùng thì ghi đè bản mới nhất. Khi có user/phòng mới hoặc bị cấm, server gửi tức thì cho mọi node.
 3. **Node → server:** node chỉ gửi bản backup (`node_sync { encryptedData }`) sau khi server chủ động phát `node_restore_request` trong cửa sổ khôi phục. Kết nối hoặc bật node bình thường không tự cấp quyền upload. Server giải mã + xác thực GCM, bản giả bị loại, bản trùng bị bỏ qua, bản thiếu được chèn lại.
+
+#### Backup định kỳ và khôi phục server
+
+Cứ mỗi 5 phút, server gửi một snapshot đầy đủ xuống từng node đang online. Node lưu các blob mã hoá trong `node_anonymous.db`; server không yêu cầu node gửi backup ngược lên trong chu kỳ định kỳ. Khi DB server bị rỗng, luồng khôi phục riêng mới mở quyền cho node gửi dữ liệu đã lưu trở lại server.
 
 #### Server mới khởi động / DB bị xoá
 

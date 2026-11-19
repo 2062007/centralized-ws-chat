@@ -7,7 +7,7 @@ const { createLimiter } = require('../ratelimit');
 
 const MAX_CONTENT = 2000;
 const RESTORE_WINDOW_MS = 10 * 60 * 1000;
-const NODE_BACKUP_INTERVAL_MS = 5 * 60 * 1000; // yêu cầu node gửi backup mỗi 5 phút
+const NODE_BACKUP_INTERVAL_MS = 5 * 60 * 1000; // server gửi snapshot backup xuống node mỗi 5 phút
 const CATCHUP_BATCH = 500; // số bản ghi tối đa mỗi lượt gửi cho node
 
 // userId -> Set<ws>  (một user có thể mở nhiều tab/thiết bị)
@@ -195,14 +195,24 @@ function maybeAutoRestore() {
   return { started: true, windowMs: RESTORE_WINDOW_MS };
 }
 
-// Định kỳ 5 phút, server chủ động mở cửa sổ upload ngắn và yêu cầu các node
-// đang online gửi lại bản backup đã lưu. Blob vẫn phải qua AES-GCM trước khi restore.
+// Định kỳ 5 phút, server gửi một snapshot backup mới xuống từng node đang online.
+// Node lưu các blob đã mã hoá vào SQLite cục bộ; không yêu cầu node upload ngược lên server.
 function startPeriodicNodeBackup() {
   const timer = setInterval(() => {
-    const nodes = countNodeClients();
-    if (!nodes) return;
-    startRestore({ windowMs: RESTORE_WINDOW_MS });
-    console.log(`📦 Yêu cầu ${nodes} node gửi backup định kỳ (chu kỳ 5 phút)`);
+    let nodes = 0;
+    for (const set of clients.values()) {
+      for (const ws of set) {
+        if (!ws.isNode || ws.readyState !== 1) continue;
+        sendFullSnapshot(ws);
+        nodes++;
+      }
+    }
+    for (const ws of anonymousNodes) {
+      if (!ws.isNode || ws.readyState !== 1) continue;
+      sendFullSnapshot(ws);
+      nodes++;
+    }
+    if (nodes) console.log(`📦 Đã gửi 1 bản backup đến ${nodes} node (chu kỳ 5 phút)`);
   }, NODE_BACKUP_INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();
   return timer;
