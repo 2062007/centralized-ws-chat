@@ -6,7 +6,7 @@ from console import ainput
 
 HELP = (
     "Lệnh: /rooms, /join <id> [mật khẩu], /create <tên> [mật khẩu], /leave, "
-    "/msg <user_id> <nội dung>, /node on|off, /help, /exit"
+    "/msg <user_id> <nội dung>, /node on|off|status, /help, /exit"
 )
 
 
@@ -24,6 +24,7 @@ class ChatInterface:
     async def start(self):
         await self.ws.connect()
         print(f"{Fore.CYAN}Đã kết nối tới server{Style.RESET_ALL}")
+        await self._announce_node()
         print(HELP)
         tasks = [asyncio.create_task(self._input_handler()), asyncio.create_task(self._receive_handler())]
         try:
@@ -34,6 +35,14 @@ class ChatInterface:
                 t.cancel()
             await self.ws.close()
             self.node.close()
+
+    async def _announce_node(self):
+        """Báo cho server biết client này là node backup (nếu đang bật)."""
+        if self.node.enabled:
+            await self.ws.send({"type": "node_mode", "enabled": True})
+            print(f"{Fore.GREEN}Node backup: BẬT{Style.RESET_ALL} (đang lưu {self.node.count()} bản ghi, tắt bằng /node off)")
+        else:
+            print("Node backup: TẮT (bật bằng /node on)")
 
     # ---------- nhập liệu ----------
     async def _input_handler(self):
@@ -89,12 +98,15 @@ class ChatInterface:
                 self.current_room_password = None
                 print("Đã rời phòng")
         elif name == "/node":
-            if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
-                return print("Cú pháp: /node on|off")
+            if len(parts) == 1 or parts[1].lower() == "status":
+                state = "BẬT" if self.node.enabled else "TẮT"
+                return print(f"Node backup: {state} (đang lưu {self.node.count()} bản ghi)")
+            if parts[1].lower() not in ("on", "off"):
+                return print("Cú pháp: /node on|off|status")
             enabled = parts[1].lower() == "on"
             self.node.set_enabled(enabled)
             await self.ws.send({"type": "node_mode", "enabled": enabled})
-            print(f"Node mode {'bật' if enabled else 'tắt'} (đang lưu {self.node.count()} bản ghi)")
+            print(f"Node backup {'bật' if enabled else 'tắt'} (đã lưu lại cho lần chạy sau)")
         elif name == "/msg":
             if len(parts) < 3 or not parts[1].isdigit():
                 return print("Cú pháp: /msg <user_id> <nội dung>")

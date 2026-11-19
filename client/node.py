@@ -7,7 +7,6 @@ class NodeManager:
 
     def __init__(self, username):
         self.username = username
-        self.enabled = False
         # Tên file an toàn (username đã được server giới hạn ký tự)
         safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in username)
         self.db_path = f"node_{safe}.db"
@@ -19,10 +18,21 @@ class NodeManager:
                    received_at DATETIME DEFAULT CURRENT_TIMESTAMP
                )"""
         )
+        self.conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.conn.commit()
+        # Mặc định BẬT: mọi client đều là node backup, trừ khi người dùng /node off
+        row = self.conn.execute("SELECT value FROM settings WHERE key = 'node_enabled'").fetchone()
+        self.enabled = True if row is None else row[0] == "1"
 
     def set_enabled(self, enabled):
+        """Đổi chế độ node và lưu lại để lần chạy sau giữ nguyên."""
         self.enabled = enabled
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('node_enabled', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("1" if enabled else "0",),
+        )
+        self.conn.commit()
 
     def store_encrypted(self, encrypted):
         if self.enabled and isinstance(encrypted, str):
