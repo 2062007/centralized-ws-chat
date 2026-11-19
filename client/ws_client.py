@@ -28,12 +28,10 @@ class WSClient:
         self.session = aiohttp.ClientSession()
         ws_url = self.server_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + "/ws"
         try:
-            self.ws = await self.session.ws_connect(
-                ws_url,
-                params={"token": self.token},
-                ssl=ssl_param(self.server_url),
-                heartbeat=25,
-            )
+            options = {"ssl": ssl_param(self.server_url), "heartbeat": 25}
+            if self.token:
+                options["params"] = {"token": self.token}
+            self.ws = await self.session.ws_connect(ws_url, **options)
         except Exception:
             await self._cleanup()
             raise

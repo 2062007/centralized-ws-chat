@@ -12,9 +12,10 @@ HELP = (
 
 
 class ChatInterface:
-    def __init__(self, ws_client, node_manager):
+    def __init__(self, ws_client, node_manager, sync_only=False):
         self.ws = ws_client
         self.node = node_manager
+        self.sync_only = sync_only
         self.current_room_id = None
         self.current_room_password = None
         self.pending_password = None
@@ -31,8 +32,12 @@ class ChatInterface:
         await self.ws.connect()
         print(f"{Fore.CYAN}Đã kết nối tới server{Style.RESET_ALL}")
         await self._announce_node()
-        print(HELP)
-        tasks = [asyncio.create_task(self._input_handler()), asyncio.create_task(self._receive_handler())]
+        if self.sync_only:
+            print("Chế độ backup ẩn danh đang chạy. Nhấn Ctrl+C để thoát.")
+            tasks = [asyncio.create_task(self._receive_handler())]
+        else:
+            print(HELP)
+            tasks = [asyncio.create_task(self._input_handler()), asyncio.create_task(self._receive_handler())]
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -45,9 +50,7 @@ class ChatInterface:
     async def _send_node_mode(self, enabled):
         """Báo trạng thái node + con trỏ backup; server sẽ tự gửi bù phần còn thiếu."""
         await self.ws.send({"type": "node_mode", "enabled": enabled})
-        if enabled:
-            # Gửi bản DB đang có lên server (server bỏ qua bản trùng); chạy nền để không chặn nhận tin
-            self._start_upload()
+        # Không tự upload khi vừa kết nối. Chỉ phản hồi node_restore_request từ server.
 
     def _start_upload(self, force=False):
         if self._upload_task and not self._upload_task.done():
@@ -226,6 +229,10 @@ class ChatInterface:
                 await self.ws.send({"type": "node_catchup", "afterId": msg.get("upTo", 0)})
             else:
                 print(f"{Fore.GREEN}Node backup: đã nhận dữ liệu từ server (tổng {self.node.count()} bản ghi){Style.RESET_ALL}")
+        elif t == "node_catchup_wait":
+            if self.node.enabled:
+                await asyncio.sleep(max(0.05, msg.get("retryAfterMs", 250) / 1000))
+                await self.ws.send({"type": "node_catchup", "afterId": msg.get("afterId", 0)})
         elif t == "node_restore_request":
             if self.node.enabled:
                 # Admin yêu cầu / server rỗng: gửi lại nếu lần gửi trước đã cách đây > 30s

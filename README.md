@@ -142,6 +142,17 @@ Run the client:
 python client.py
 ```
 
+**Chỉ chạy node backup, không cần đăng nhập:**
+
+```bash
+python client.py --sync-only
+```
+
+Chế độ này kết nối WebSocket không token, chỉ nhận snapshot DB đã mã hoá AES-256-GCM và gửi lại các blob backup hợp lệ khi server mở cửa sổ khôi phục. Kết nối này không thể vào phòng, đọc tin nhắn dạng rõ, gửi chat hoặc gọi API tài khoản. File backup được lưu tại `node_anonymous.db`. Client không tự upload khi vừa kết nối; chỉ gửi dữ liệu sau `node_restore_request` từ server. Server giới hạn số lần kết nối/IP, số kết nối ẩn danh đồng thời, tốc độ frame/kết nối, kích thước blob và số blob mỗi kết nối.
+
+Dùng `MASTER_KEY` ngẫu nhiên tối thiểu 32 byte và giữ nguyên bí mật. AES-256-GCM xác thực ciphertext trước khi restore; mã hoá không ngăn DoS hoặc việc xoá DB, vì vậy vẫn cần persistent disk và backup vận hành độc lập.
+
+
 When prompted, enter the server URL (e.g., https://localhost or https://your-app.onrender.com).
 You can also set the environment variable CHAT_SERVER_URL to skip the prompt.
 
@@ -266,15 +277,15 @@ Backup gồm **toàn bộ dữ liệu**: `user` (kèm password_hash), `room` và
 
 1. Client gửi `node_mode { enabled: true }`.
 2. **Server → node:** server gửi toàn bộ users, rooms rồi tin nhắn (`node_sync { kind, id, data }`; tin nhắn 500 bản ghi/lượt, node tự xin lượt tiếp bằng `node_catchup`). Node lưu theo khoá `(kind, id)`: tin nhắn trùng thì bỏ qua, user/room trùng thì ghi đè bản mới nhất. Khi có user/phòng mới hoặc bị cấm, server gửi tức thì cho mọi node.
-3. **Node → server:** node tự gửi toàn bộ bản đang có lên (`node_sync { encryptedData }`) theo thứ tự users → rooms → messages trong 10 phút sau khi kết nối. Server giải mã + xác thực GCM, bản giả bị loại, bản trùng bị bỏ qua, bản thiếu được chèn lại.
+3. **Node → server:** node chỉ gửi bản backup (`node_sync { encryptedData }`) sau khi server chủ động phát `node_restore_request` trong cửa sổ khôi phục. Kết nối hoặc bật node bình thường không tự cấp quyền upload. Server giải mã + xác thực GCM, bản giả bị loại, bản trùng bị bỏ qua, bản thiếu được chèn lại.
 
 #### Server mới khởi động / DB bị xoá
 
-Khi bảng `users` rỗng, server **vẫn cho node kết nối** (phiên "chỉ khôi phục", token vẫn hợp lệ nhờ JWT_SECRET) và gửi `node_restore_request` ngay lập tức, không chờ admin hay cửa sổ boot. Chỉ các sự kiện node được xử lý. Khi tài khoản của node được khôi phục, phiên tự nâng thành phiên chat bình thường (`welcome`). Mọi khoá tài khoản/phòng/tin nhắn giữ nguyên id gốc.
+Khi DB hoàn toàn rỗng, server tự mở cửa sổ khôi phục có thời hạn. Client ẩn danh không cần tài khoản có thể nhận snapshot mã hoá; server chỉ chấp nhận upload sau `node_restore_request`. Client đã đăng nhập cũ vẫn có thể dùng luồng restore-only bằng token còn hạn. Mọi khoá tài khoản/phòng/tin nhắn giữ nguyên id gốc.
 
 **Backup cũ chỉ có tin nhắn** (chưa có user/phòng): server dựng tài khoản/phòng *tạm* (`is_placeholder = 1`, không đăng nhập được) để giữ lịch sử. Ai đăng ký lại đúng username sẽ nhận lại tài khoản tạm (tắt bằng `ALLOW_CLAIM_PLACEHOLDER=0`; lưu ý người đăng ký trước sẽ chiếm được username đó). Khi node gửi user/phòng thật, bản tạm được ghi đè.
 
-**Client sau khi server reset:** client lưu token (hiệu lực 7 ngày) trong `config.json`. Nếu đăng nhập báo `Invalid credentials` dù mật khẩu đã lưu đúng, client tự dùng token đó để gửi backup lên trước, rồi đăng nhập lại; nếu vẫn không được sẽ hỏi đăng ký lại bằng thông tin đã lưu. Sau mỗi lần gửi, client in kết quả server trả về (khôi phục mới / đã có / thiếu user / thiếu phòng / không hợp lệ).
+**Client sau khi server reset:** có thể chạy `python client.py --sync-only` trên bất kỳ máy nào đã giữ `node_anonymous.db`; không cần tài khoản hay JWT. Client đã đăng nhập trước đây cũng có thể dùng token còn hạn để phục hồi theo luồng tương thích cũ.
 
 ⚠️ Node clients cannot decrypt the blobs without the MASTER_KEY, ensuring that even if a node is compromised, the chat history remains confidential.
 

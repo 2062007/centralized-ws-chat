@@ -13,6 +13,12 @@ const CATCHUP_BATCH = 500; // số bản ghi tối đa mỗi lượt gửi cho n
 const clients = new Map();
 // roomId -> Set<ws>
 const rooms = new Map();
+// Kết nối node ẩn danh: chỉ được đồng bộ blob mã hoá, không có quyền chat/API.
+const anonymousNodes = new Set();
+const anonymousConnectionLimiter = createLimiter(30, 60 * 1000); // tối đa 30 lần kết nối/IP/phút
+const anonymousMessageLimiter = createLimiter(120, 1000); // tối đa 120 frame/kết nối/giây
+const MAX_NODE_BLOB_CHARS = 20000;
+const MAX_NODE_UPLOADS_PER_CONNECTION = 100000;
 
 // ---- Trạng thái khôi phục ----
 let restoreUntil = 0;      // hạn "mềm" — có thể gia hạn khi node mới vào
@@ -33,14 +39,29 @@ function broadcastToRoom(roomId, obj) {
   for (const ws of rooms.get(roomId) || []) send(ws, obj);
 }
 
+function sendRestoreRequest(ws) {
+  // Chỉ cấp quyền upload khi server chủ động yêu cầu phục hồi.
+  ws.restoreAuthorizedUntil = restoreUntil > Date.now() ? restoreUntil : 0;
+  send(ws, { type: 'node_restore_request', expiresAt: ws.restoreAuthorizedUntil || null });
+}
+
 function broadcastToNodeClients(obj) {
   for (const set of clients.values()) {
-    for (const ws of set) if (ws.isNode) send(ws, obj);
+    for (const ws of set) {
+      if (!ws.isNode) continue;
+      if (obj && obj.type === 'node_restore_request') sendRestoreRequest(ws);
+      else send(ws, obj);
+    }
+  }
+  for (const ws of anonymousNodes) {
+    if (!ws.isNode) continue;
+    if (obj && obj.type === 'node_restore_request') sendRestoreRequest(ws);
+    else send(ws, obj);
   }
 }
 
 function countNodeClients() {
-  let n = 0;
+  let n = anonymousNodes.size;
   for (const set of clients.values()) for (const ws of set) if (ws.isNode) n++;
   return n;
 }
@@ -163,7 +184,7 @@ function startRestore({ extend = false, windowMs = RESTORE_WINDOW_MS } = {}) {
 // Gọi lúc boot: nếu bảng messages rỗng thì mở cửa sổ auto-restore dài.
 // Node client kết nối sau đó sẽ được yêu cầu gửi dữ liệu.
 function maybeAutoRestore() {
-  const empty = db.prepare('SELECT COUNT(*) AS n FROM messages').get().n === 0;
+  const empty = db.prepare('SELECT (SELECT COUNT(*) FROM users) + (SELECT COUNT(*) FROM rooms) + (SELECT COUNT(*) FROM messages) AS n').get().n === 0;
   if (!empty) return { started: false, reason: 'db not empty' };
 
   // startRestore() (không extend) reset autoRestoreOnBoot về false, nên phải bật cờ SAU khi gọi
@@ -304,6 +325,74 @@ function restoreMessage(m) {
 // Kết nối WebSocket
 // ---------------------------------------------------------------
 
+// Node ẩn danh: không cấp danh tính chat, chỉ cho phép nhận snapshot và gửi blob
+// AES-256-GCM đã được server phát hành trước đó để phục hồi DB.
+function handleAnonymousNodeConnection(ws, req) {
+  const ip = (req && req.socket && req.socket.remoteAddress) || 'unknown';
+  if (anonymousNodes.size >= 200 || !anonymousConnectionLimiter(ip)) {
+    ws.close(1008, 'Rate limit exceeded');
+    return;
+  }
+  ws.anonymousIp = ip;
+  ws.isNode = false;
+  ws.isAlive = true;
+  ws.restoreAuthorizedUntil = 0;
+  ws.nodeUploadCount = 0;
+  const rateKey = `${ip}:${(ws._socket && ws._socket.remotePort) || 'connection'}`;
+  anonymousNodes.add(ws);
+  ws.on('pong', () => { ws.isAlive = true; });
+  send(ws, { type: 'node_ready', authenticated: false, message: 'Chế độ backup ẩn danh' });
+
+  ws.on('message', (raw) => {
+    if (!anonymousMessageLimiter(rateKey)) {
+      ws.close(1008, 'Rate limit exceeded');
+      return;
+    }
+    let msg;
+    try { msg = JSON.parse(raw); } catch (_) { return send(ws, { type: 'error', message: 'Tin nhắn không hợp lệ' }); }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+    if (msg.type === 'node_mode') {
+      if (msg.enabled !== true) { ws.isNode = false; return send(ws, { type: 'node_mode_ack', enabled: false }); }
+      if (ws.isNode) return; // không cho lặp node_mode để ép server phát snapshot liên tục
+      ws.isNode = true;
+      ws.lastCatchupAt = 0;
+      send(ws, { type: 'node_mode_ack', enabled: true });
+      sendFullSnapshot(ws);
+      // Không tự cấp quyền upload khi client kết nối. Chỉ mở khi DB rỗng hoặc admin yêu cầu.
+      if (restoreUntil > Date.now()) sendRestoreRequest(ws);
+      return;
+    }
+    if (!ws.isNode) return;
+    if (msg.type === 'node_catchup') {
+      const now = Date.now();
+      const elapsed = now - (ws.lastCatchupAt || 0);
+      if (elapsed < 250) {
+        send(ws, { type: 'node_catchup_wait', afterId: msg.afterId, retryAfterMs: 250 - elapsed });
+        return;
+      }
+      ws.lastCatchupAt = now;
+      if (Number.isInteger(msg.afterId) && msg.afterId >= 0) sendCatchup(ws, msg.afterId);
+      return;
+    }
+    if (msg.type === 'node_sync') {
+      const now = Date.now();
+      const inWindow = now <= (ws.restoreAuthorizedUntil || 0) && now <= restoreUntil;
+      if (!inWindow || typeof msg.encryptedData !== 'string' || msg.encryptedData.length < 40 || msg.encryptedData.length > MAX_NODE_BLOB_CHARS) return;
+      if (++ws.nodeUploadCount > MAX_NODE_UPLOADS_PER_CONNECTION) { ws.close(1008, 'Upload limit exceeded'); return; }
+      try {
+        const result = restoreBlob(JSON.parse(decryptFromNode(msg.encryptedData)));
+        send(ws, { type: 'node_sync_ack', restored: result === 'ok', result });
+      } catch (_) { /* blob sai MAC / sai khoá / dữ liệu hỏng */ }
+      return;
+    }
+    send(ws, { type: 'error', message: 'Kết nối này chỉ hỗ trợ đồng bộ backup' });
+  });
+
+  ws.on('close', () => anonymousNodes.delete(ws));
+  ws.on('error', (err) => console.error('[WS] Anonymous node error:', err.message));
+}
+
+
 function handleConnection(ws) {
   const { userId, username } = ws.user;
 
@@ -327,10 +416,11 @@ function handleConnection(ws) {
   clients.get(userId).add(ws);
 
   if (ws.restoreOnly) {
-    // Phát hiện server rỗng: yêu cầu node gửi backup NGAY (không chờ admin / cửa sổ boot)
+    // Server đã mất users: mở cửa sổ phục hồi có giới hạn rồi yêu cầu node gửi backup.
     console.log(`[WS] Server rỗng — mở phiên khôi phục cho ${username} (ID: ${userId})`);
+    if (restoreUntil <= Date.now()) startRestore({ windowMs: RESTORE_WINDOW_MS });
     send(ws, { type: 'node_restore_hint', active: true });
-    send(ws, { type: 'node_restore_request' });
+    sendRestoreRequest(ws);
   } else {
     send(ws, { type: 'welcome', userId, username });
     send(ws, { type: 'rooms', data: getPublicRooms() });
@@ -479,23 +569,27 @@ function handleConnection(ws) {
         }
 
         case 'node_mode': {
+          if (msg.enabled === true && ws.isNode) break;
           ws.isNode = !!msg.enabled;
           send(ws, { type: 'node_mode_ack', enabled: ws.isNode });
           if (ws.isNode) {
             // Vừa kết nối: server gửi toàn bộ dữ liệu mã hoá xuống node (node bỏ qua bản trùng)...
             sendFullSnapshot(ws);
-            // ...và cho phép node gửi bản DB đang có lên server trong cửa sổ này (server bỏ qua bản trùng)
-            ws.nodeUploadUntil = Date.now() + RESTORE_WINDOW_MS;
-            // Node mới bật giữa cửa sổ auto-restore → gia hạn + yêu cầu gửi dữ liệu
-            if (autoRestoreOnBoot && Date.now() <= restoreDeadline) {
-              startRestore({ extend: true }); // đã broadcast node_restore_request tới mọi node (gồm node này)
-            }
+            // Upload chỉ được phép sau node_restore_request do server chủ động phát.
+            if (restoreUntil > Date.now()) sendRestoreRequest(ws);
           }
           break;
         }
 
         case 'node_catchup': {
           if (!ws.isNode || !Number.isInteger(msg.afterId) || msg.afterId < 0) return;
+          const now = Date.now();
+          const elapsed = now - (ws.lastCatchupAt || 0);
+          if (elapsed < 250) {
+            send(ws, { type: 'node_catchup_wait', afterId: msg.afterId, retryAfterMs: 250 - elapsed });
+            return;
+          }
+          ws.lastCatchupAt = now;
           sendCatchup(ws, msg.afterId);
           break;
         }
@@ -506,11 +600,12 @@ function handleConnection(ws) {
 
           // Cho phép nếu còn trong cửa sổ mềm hoặc cửa sổ cứng auto-restore
           const now = Date.now();
-          const inWindow = now <= Math.max(restoreUntil, ws.nodeUploadUntil || 0) ||
-            (autoRestoreOnBoot && now <= restoreDeadline);
+          const inWindow = now <= (ws.restoreAuthorizedUntil || 0) && now <= restoreUntil;
           if (!inWindow) return;
 
-          if (typeof msg.encryptedData !== 'string' || msg.encryptedData.length > 20000) return;
+          if (typeof msg.encryptedData !== 'string' || msg.encryptedData.length < 40 || msg.encryptedData.length > MAX_NODE_BLOB_CHARS) return;
+          ws.nodeUploadCount = (ws.nodeUploadCount || 0) + 1;
+          if (ws.nodeUploadCount > MAX_NODE_UPLOADS_PER_CONNECTION) { ws.close(1008, 'Upload limit exceeded'); return; }
 
           let result = 'invalid';
           try {
@@ -559,6 +654,7 @@ function startHeartbeat(wss) {
 
 module.exports = {
   handleConnection,
+  handleAnonymousNodeConnection,
   startHeartbeat,
   broadcastRooms,
   startRestore,

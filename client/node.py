@@ -96,8 +96,8 @@ class NodeManager:
         items = self.get_all_encrypted()
         for i, data in enumerate(items, 1):
             await ws_client.send({"type": "node_sync", "encryptedData": data})
-            if i % 50 == 0:
-                await asyncio.sleep(0.05)  # nhường vòng lặp, tránh nghẽn
+            if i % 25 == 0:
+                await asyncio.sleep(0.25)  # ~100 frame/s, phù hợp giới hạn server
         return len(items)
 
     def close(self):

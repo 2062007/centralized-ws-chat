@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 
 from colorama import init, Fore, Style
 
@@ -85,6 +86,17 @@ async def recover_server(auth):
 async def main():
     auth = AuthManager(await resolve_server_url())
 
+    # Chạy node backup thuần tuý, không cần username/password/token.
+    if "--sync-only" in sys.argv:
+        ws = WSClient(None, "anonymous", None, auth.server_url)
+        node = NodeManager("anonymous")
+        node.set_enabled(True)
+        try:
+            await ChatInterface(ws, node, sync_only=True).start()
+        except OSError as exc:
+            print(f"{Fore.RED}Không kết nối được WebSocket: {exc}{Style.RESET_ALL}")
+        return
+
     logged_in = False
     if auth.has_creds():
         for _ in range(3):
@@ -111,7 +123,7 @@ async def main():
         print(f"{Fore.GREEN}Đã đăng nhập: {auth.username}{Style.RESET_ALL}")
 
     while not logged_in:
-        print("\n1. Đăng nhập\n2. Đăng ký\n3. Đổi URL server\n4. Thoát")
+        print("\n1. Đăng nhập\n2. Đăng ký\n3. Đổi URL server\n4. Đồng bộ backup ẩn danh (không đăng nhập)\n5. Thoát")
         choice = (await ainput("Chọn: ")).strip()
         if choice == "1":
             username = (await ainput("Tên đăng nhập: ")).strip()
@@ -134,6 +146,16 @@ async def main():
                 save_server_url(new_url)
                 print(f"{Fore.GREEN}Đã đổi server: {new_url}{Style.RESET_ALL}")
         elif choice == "4":
+            ws = WSClient(None, "anonymous", None, auth.server_url)
+            node = NodeManager("anonymous")
+            node.set_enabled(True)
+            chat = ChatInterface(ws, node, sync_only=True)
+            try:
+                await chat.start()
+            except OSError as exc:
+                print(f"{Fore.RED}Không kết nối được WebSocket: {exc}{Style.RESET_ALL}")
+            return
+        elif choice == "5":
             return
         else:
             print("Lựa chọn không hợp lệ")

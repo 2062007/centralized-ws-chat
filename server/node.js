@@ -20,8 +20,11 @@ function encryptForNode(data) {
 
 // Ném lỗi nếu dữ liệu bị sửa / sai khoá (GCM xác thực toàn vẹn)
 function decryptFromNode(encryptedBase64) {
+  if (typeof encryptedBase64 !== 'string' || encryptedBase64.length > 20000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encryptedBase64)) {
+    throw new Error('invalid base64');
+  }
   const buffer = Buffer.from(encryptedBase64, 'base64');
-  if (buffer.length < 28) throw new Error('blob too short');
+  if (buffer.length < 28 || buffer.toString('base64') !== encryptedBase64) throw new Error('blob too short or non-canonical base64');
   const iv = buffer.subarray(0, 12);
   const tag = buffer.subarray(12, 28);
   const encrypted = buffer.subarray(28);

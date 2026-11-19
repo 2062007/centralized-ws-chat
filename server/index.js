@@ -13,7 +13,7 @@ const authRoutes = require('./routes/auth');
 const roomRoutes = require('./routes/rooms');
 const msgRoutes = require('./routes/messages');
 const adminRoutes = require('./routes/admin');
-const { handleConnection, startHeartbeat, maybeAutoRestore } = require('./websocket/handlers');
+const { handleConnection, handleAnonymousNodeConnection, startHeartbeat, maybeAutoRestore } = require('./websocket/handlers');
 
 const app = express();
 app.disable('x-powered-by');
@@ -80,10 +80,11 @@ wss.on('connection', (ws, req) => {
     token = new URL(req.url, 'http://localhost').searchParams.get('token');
   } catch (e) { /* ignore */ }
 
-  const user = verifyToken(token);
+  const user = token ? verifyToken(token) : null;
   if (!user) {
-    console.log('[WS] Authentication failed – closing connection');
-    ws.close(1008, 'Unauthorized');
+    // Không token = node backup ẩn danh; chỉ được gửi/nhận blob mã hoá, không được chat.
+    console.log('[WS] Anonymous backup node connected');
+    handleAnonymousNodeConnection(ws, req);
     return;
   }
   ws.user = user;
